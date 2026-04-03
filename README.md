@@ -25,6 +25,12 @@ Self-hosted MVP voice platform on ASP.NET Core with multi-user screen sharing (D
 docker compose up --build
 ```
 
+For local dev profile (`.env.local`):
+
+```bash
+docker compose --env-file .env.local up -d --build --force-recreate
+```
+
 3. Open:
 - web: `https://localhost` (self-signed cert by Caddy internal CA)
 - api endpoints via reverse proxy: `https://localhost/api/*`

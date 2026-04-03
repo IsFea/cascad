@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cascad.Api", "Cascad.Api\Cascad.Api.csproj", "{4A67A119-A013-44BB-B8DB-29BC399B0C79}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cascad.Api.Tests", "Cascad.Api.Tests\Cascad.Api.Tests.csproj", "{329A3727-1917-474D-A849-6429FCCEFF79}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4A67A119-A013-44BB-B8DB-29BC399B0C79}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4A67A119-A013-44BB-B8DB-29BC399B0C79}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4A67A119-A013-44BB-B8DB-29BC399B0C79}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4A67A119-A013-44BB-B8DB-29BC399B0C79}.Release|Any CPU.Build.0 = Release|Any CPU
+		{329A3727-1917-474D-A849-6429FCCEFF79}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{329A3727-1917-474D-A849-6429FCCEFF79}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{329A3727-1917-474D-A849-6429FCCEFF79}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{329A3727-1917-474D-A849-6429FCCEFF79}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

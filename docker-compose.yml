@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cascad-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cascad}
+      POSTGRES_USER: ${POSTGRES_USER:-cascad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cascad}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Cascad.Api/Dockerfile
+    container_name: cascad-api
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-cascad};Username=${POSTGRES_USER:-cascad};Password=${POSTGRES_PASSWORD:-cascad}
+      AppJwt__Issuer: ${APP_JWT_ISSUER:-Cascad.Api}
+      AppJwt__Audience: ${APP_JWT_AUDIENCE:-Cascad.Web}
+      AppJwt__SigningKey: ${APP_JWT_SIGNING_KEY:-CHANGE_ME_TO_A_LONG_RANDOM_SECRET_1234567890}
+      AppJwt__ExpiresMinutes: ${APP_JWT_EXPIRES_MINUTES:-180}
+      LiveKit__ApiKey: ${LIVEKIT_API_KEY:-devkey}
+      LiveKit__ApiSecret: ${LIVEKIT_API_SECRET:-DEV_LIVEKIT_SECRET_KEY_1234567890123456}
+      LiveKit__RtcUrl: ${RTC_URL:-wss://localhost}
+      Client__BaseUrl: ${CLIENT_BASE_URL:-https://localhost}
+      Seed__Enabled: ${SEED_ENABLED:-true}
+      Seed__CreateDemoRoom: ${SEED_CREATE_DEMO_ROOM:-true}
+      Seed__DemoOwnerNickname: ${SEED_DEMO_OWNER_NICKNAME:-host}
+      Seed__DemoRoomName: ${SEED_DEMO_ROOM_NAME:-Lobby}
+      Seed__DemoInviteToken: ${SEED_DEMO_INVITE_TOKEN:-DEMO_INVITE_HOST_LOBBY}
+      Seed__DemoInviteExpiresHours: ${SEED_DEMO_INVITE_EXPIRES_HOURS:-720}
+      Cors__AllowedOrigins__0: ${CORS_ORIGIN_0:-https://localhost}
+      Cors__AllowedOrigins__1: ${CORS_ORIGIN_1:-http://localhost:5173}
+    depends_on:
+      - postgres
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${WEB_API_URL:-/api}
+    container_name: cascad-web
+    restart: unless-stopped
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: cascad-livekit
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./infra/livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+
+  coturn:
+    image: ${COTURN_IMAGE:-coturn/coturn:latest}
+    container_name: cascad-coturn
+    restart: unless-stopped
+    command: -c /etc/turnserver.conf
+    volumes:
+      - ./infra/turnserver.conf:/etc/turnserver.conf:ro
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+
+  caddy:
+    image: caddy:2.8
+    container_name: cascad-caddy
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

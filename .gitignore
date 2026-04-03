@@ -1,0 +1,11 @@
+.DS_Store
+.dotnet/
+.env
+.idea/
+.vscode/
+*.bak
+**/bin/
+**/obj/
+**/TestResults/
+web/node_modules/
+web/dist/

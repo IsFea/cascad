@@ -5,8 +5,27 @@ Self-hosted MVP voice platform on ASP.NET Core with multi-user screen sharing (D
 ## Stack
 
 - `backend`: ASP.NET Core 8 + EF Core + PostgreSQL + JWT
-- `web`: React + TypeScript + LiveKit client
+- `web`: React + TypeScript + LiveKit client + MUI
 - `infra`: Docker Compose with LiveKit SFU, coturn, Caddy reverse proxy, PostgreSQL
+
+## Room UX (Current)
+
+- Discord-like room layout: media controls + streams + participants panel
+- Display names in room use participant `name` (nickname), not raw identity ID
+- Active speaker indicators on participant cards and stream tiles
+- Local controls for each remote participant:
+  - volume slider (`0%` to `200%` UI range)
+  - local mute toggle
+- Stream tile context menu (right click):
+  - local mute/unmute
+  - local volume
+- Device controls:
+  - microphone selection
+  - output device selection (when browser supports sink switching)
+- Screen-share quality presets:
+  - `Game` (1080p/30fps)
+  - `Balanced` (720p/15fps)
+  - `Text` (1080p/15fps)
 
 ## Implemented API
 
@@ -30,6 +49,9 @@ For local dev profile (`.env.local`):
 ```bash
 docker compose --env-file .env.local up -d --build --force-recreate
 ```
+
+Important: if you open web via `https://localhost`, `RTC_URL` must also be secure (`wss://localhost`).
+Using `ws://localhost` with HTTPS UI causes `308` redirects on `/rtc/*` and LiveKit signal failures.
 
 3. Open:
 - web: `https://localhost` (self-signed cert by Caddy internal CA)
@@ -115,8 +137,23 @@ export DOTNET_CLI_HOME="$PWD/.dotnet"
 dotnet test backend/Cascad.sln
 ```
 
+Web unit tests:
+
+```bash
+cd web
+npm run test:unit
+```
+
+Web e2e smoke (requires running stack on `https://localhost`):
+
+```bash
+cd web
+npm run test:e2e:smoke
+```
+
 Covered:
 - JWT generation checks
 - Invite token hash behavior
 - Integration flow `guest -> create room -> invite -> join -> rtc token`
 - Rejection on expired invite
+- Room UX smoke: join flow, settings popover, chat placeholder tab, layout switching (`grid/focus/theater`)

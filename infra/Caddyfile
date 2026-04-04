@@ -15,3 +15,22 @@
     reverse_proxy web:80
   }
 }
+
+https://localhost {
+  tls internal
+  encode gzip
+
+  @api path /api/*
+  handle @api {
+    reverse_proxy api:8080
+  }
+
+  @rtc path /rtc*
+  handle @rtc {
+    reverse_proxy livekit:7880
+  }
+
+  handle {
+    reverse_proxy web:80
+  }
+}

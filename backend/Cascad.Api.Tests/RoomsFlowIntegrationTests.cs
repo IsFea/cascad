@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.IdentityModel.Tokens.Jwt;
 using Cascad.Api.Contracts.Auth;
 using Cascad.Api.Contracts.Rooms;
 using Cascad.Api.Data;
@@ -51,6 +52,9 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
         Assert.False(string.IsNullOrWhiteSpace(joined.AppToken));
         Assert.False(string.IsNullOrWhiteSpace(joined.RtcToken));
         Assert.False(string.IsNullOrWhiteSpace(joined.RtcUrl));
+
+        var rtcJwt = new JwtSecurityTokenHandler().ReadJwtToken(joined.RtcToken);
+        Assert.Contains(rtcJwt.Claims, x => x.Type == "name" && x.Value == joined.User.Nickname);
     }
 
     [Fact]

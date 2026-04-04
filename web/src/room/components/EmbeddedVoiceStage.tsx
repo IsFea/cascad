@@ -54,6 +54,7 @@ export type EmbeddedVoiceControls = {
   muted: boolean;
   sharing: boolean;
   connected: boolean;
+  connectionError: boolean;
   toggleMute: () => Promise<void>;
   toggleShare: () => Promise<void>;
   openSettings: () => void;
@@ -282,6 +283,7 @@ export function EmbeddedVoiceStage(props: {
       muted: media.muted,
       sharing: media.sharing,
       connected: media.connected,
+      connectionError: Boolean(media.error),
       toggleMute: media.toggleLocalMute,
       toggleShare: async () => {
         if (media.sharing) {
@@ -298,7 +300,14 @@ export function EmbeddedVoiceStage(props: {
       },
       openSettings: () => setSettingsOpen(true),
     });
-  }, [media.connected, media.muted, media.sharing, media.toggleLocalMute, props.onControlsChange]);
+  }, [
+    media.connected,
+    media.error,
+    media.muted,
+    media.sharing,
+    media.toggleLocalMute,
+    props.onControlsChange,
+  ]);
 
   useEffect(() => {
     const speakingUsers = new Set(

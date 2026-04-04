@@ -4,7 +4,11 @@ import {
   isVoiceEarconCooldownPassed,
   normalizeVoicePresenceChangedEvent,
   patchWorkspaceMembersVoiceState,
+  resolveLocalConnectEarconType,
   resolveVoiceEarconType,
+  shouldPlayLocalDisconnectEarcon,
+  shouldStartConnectingEarconLoop,
+  VOICE_DISCONNECT_EARCON_DEDUPE_MS,
   VOICE_EARCON_COOLDOWN_MS,
 } from "./voicePresence";
 
@@ -131,6 +135,48 @@ describe("voicePresence:isVoiceEarconCooldownPassed", () => {
 
   it("allows earcon after cooldown", () => {
     expect(isVoiceEarconCooldownPassed(1350, 1000, VOICE_EARCON_COOLDOWN_MS)).toBe(true);
+  });
+});
+
+describe("voicePresence:resolveLocalConnectEarconType", () => {
+  it("returns connect only for false -> true transition", () => {
+    expect(resolveLocalConnectEarconType(false, true)).toBe("connect");
+    expect(resolveLocalConnectEarconType(false, false)).toBeNull();
+    expect(resolveLocalConnectEarconType(true, true)).toBeNull();
+    expect(resolveLocalConnectEarconType(true, false)).toBeNull();
+  });
+});
+
+describe("voicePresence:shouldStartConnectingEarconLoop", () => {
+  it("starts only while voice session exists and rtc is not connected without connection errors", () => {
+    expect(shouldStartConnectingEarconLoop(true, false, false)).toBe(true);
+    expect(shouldStartConnectingEarconLoop(false, false, false)).toBe(false);
+    expect(shouldStartConnectingEarconLoop(true, true, false)).toBe(false);
+    expect(shouldStartConnectingEarconLoop(true, false, true)).toBe(false);
+  });
+});
+
+describe("voicePresence:shouldPlayLocalDisconnectEarcon", () => {
+  it("plays only on local channel detach outside dedupe window", () => {
+    expect(
+      shouldPlayLocalDisconnectEarcon("v-1", null, 2000, 900, VOICE_DISCONNECT_EARCON_DEDUPE_MS),
+    ).toBe(true);
+
+    expect(
+      shouldPlayLocalDisconnectEarcon("v-1", null, 1200, 900, VOICE_DISCONNECT_EARCON_DEDUPE_MS),
+    ).toBe(false);
+  });
+
+  it("does not play for unchanged or attach transitions", () => {
+    expect(
+      shouldPlayLocalDisconnectEarcon(null, null, 2000, 0, VOICE_DISCONNECT_EARCON_DEDUPE_MS),
+    ).toBe(false);
+    expect(
+      shouldPlayLocalDisconnectEarcon(null, "v-1", 2000, 0, VOICE_DISCONNECT_EARCON_DEDUPE_MS),
+    ).toBe(false);
+    expect(
+      shouldPlayLocalDisconnectEarcon("v-1", "v-2", 2000, 0, VOICE_DISCONNECT_EARCON_DEDUPE_MS),
+    ).toBe(false);
   });
 });
 

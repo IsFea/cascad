@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
+  ConnectionState,
   createAudioAnalyser,
   createLocalAudioTrack,
   LocalAudioTrack,
@@ -39,6 +40,15 @@ import { resolveDisplayName } from "./utils";
 const DEFAULT_CHANNEL_VOLUME = 1;
 const VOICE_ACTIVE_HOLD_MS = 320;
 const STREAM_ACTIVE_HOLD_MS = 740;
+const SCREEN_SHARE_CONNECT_TIMEOUT_MS = 4000;
+
+function isEngineNotConnectedTimeoutError(reason: unknown): boolean {
+  if (!(reason instanceof Error)) {
+    return false;
+  }
+
+  return reason.message.toLowerCase().includes("engine not connected");
+}
 
 type UseRoomMediaControllerResult = {
   connected: boolean;
@@ -139,6 +149,47 @@ export function useRoomMediaController(
   const localVoiceAnalyserRef = useRef<ReturnType<typeof createAudioAnalyser> | null>(null);
   const localVoiceActivityIntervalIdRef = useRef<number | null>(null);
   const localVoiceActiveUntilMsRef = useRef<number | undefined>(undefined);
+
+  const waitForRoomConnected = (room: Room, timeoutMs = SCREEN_SHARE_CONNECT_TIMEOUT_MS) => {
+    if (room.state === ConnectionState.Connected) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise<boolean>((resolve) => {
+      let finished = false;
+      let timeoutId: number | null = null;
+
+      const complete = (connectedNow: boolean) => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        if (timeoutId !== null) {
+          window.clearTimeout(timeoutId);
+        }
+        room.off(RoomEvent.ConnectionStateChanged, onConnectionStateChanged);
+        room.off(RoomEvent.Disconnected, onDisconnected);
+        resolve(connectedNow);
+      };
+
+      const onConnectionStateChanged = (state: ConnectionState) => {
+        if (state === ConnectionState.Connected) {
+          complete(true);
+        }
+      };
+
+      const onDisconnected = () => {
+        complete(false);
+      };
+
+      room.on(RoomEvent.ConnectionStateChanged, onConnectionStateChanged);
+      room.on(RoomEvent.Disconnected, onDisconnected);
+
+      timeoutId = window.setTimeout(() => {
+        complete(room.state === ConnectionState.Connected);
+      }, timeoutMs);
+    });
+  };
 
   useEffect(() => {
     mutedRef.current = muted;
@@ -789,30 +840,63 @@ export function useRoomMediaController(
       activeSpeakersRef.current = new Set(activeParticipants.map((item) => item.identity));
       queueSyncParticipants();
     };
-
-    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
-    room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
-    room.on(RoomEvent.ParticipantConnected, () => syncParticipants(room));
-    room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
-    room.on(RoomEvent.ParticipantNameChanged, () => syncParticipants(room));
-    room.on(RoomEvent.MediaDevicesChanged, () => {
+    const onParticipantConnected = () => {
+      syncParticipants(room);
+    };
+    const onParticipantNameChanged = () => {
+      syncParticipants(room);
+    };
+    const onMediaDevicesChanged = () => {
       void refreshDevices(false);
-    });
-    room.on(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
-    room.on(RoomEvent.Disconnected, () => {
+    };
+    const onReconnecting = () => {
       setConnected(false);
       setSharing(false);
-    });
-    room.on(RoomEvent.LocalTrackPublished, (publication) => {
+    };
+    const onSignalReconnecting = () => {
+      setConnected(false);
+    };
+    const onReconnected = () => {
+      setConnected(true);
+      setError(null);
+      syncParticipants(room);
+    };
+    const onConnectionStateChanged = (state: ConnectionState) => {
+      const isConnected = state === ConnectionState.Connected;
+      setConnected(isConnected);
+      if (!isConnected) {
+        setSharing(false);
+      }
+    };
+    const onDisconnected = () => {
+      setConnected(false);
+      setSharing(false);
+    };
+    const onLocalTrackPublished = (publication: { track?: { source?: Track.Source } }) => {
       if (publication.track?.source === Track.Source.ScreenShare) {
         setSharing(true);
       }
-    });
-    room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+    };
+    const onLocalTrackUnpublished = (publication: { track?: { source?: Track.Source } }) => {
       if (publication.track?.source === Track.Source.ScreenShare) {
         setSharing(false);
       }
-    });
+    };
+
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
+    room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+    room.on(RoomEvent.ParticipantNameChanged, onParticipantNameChanged);
+    room.on(RoomEvent.MediaDevicesChanged, onMediaDevicesChanged);
+    room.on(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
+    room.on(RoomEvent.Reconnecting, onReconnecting);
+    room.on(RoomEvent.SignalReconnecting, onSignalReconnecting);
+    room.on(RoomEvent.Reconnected, onReconnected);
+    room.on(RoomEvent.ConnectionStateChanged, onConnectionStateChanged);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+    room.on(RoomEvent.LocalTrackPublished, onLocalTrackPublished);
+    room.on(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
 
     const connect = async () => {
       try {
@@ -839,8 +923,18 @@ export function useRoomMediaController(
     return () => {
       room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
       room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+      room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
       room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+      room.off(RoomEvent.ParticipantNameChanged, onParticipantNameChanged);
+      room.off(RoomEvent.MediaDevicesChanged, onMediaDevicesChanged);
       room.off(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
+      room.off(RoomEvent.Reconnecting, onReconnecting);
+      room.off(RoomEvent.SignalReconnecting, onSignalReconnecting);
+      room.off(RoomEvent.Reconnected, onReconnected);
+      room.off(RoomEvent.ConnectionStateChanged, onConnectionStateChanged);
+      room.off(RoomEvent.Disconnected, onDisconnected);
+      room.off(RoomEvent.LocalTrackPublished, onLocalTrackPublished);
+      room.off(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
 
       void room.disconnect();
 
@@ -953,25 +1047,40 @@ export function useRoomMediaController(
   };
 
   const startScreenShare = async () => {
-    if (!roomRef.current) {
+    const room = roomRef.current;
+    if (!room) {
       return false;
+    }
+
+    if (room.state !== ConnectionState.Connected) {
+      const connectedNow = await waitForRoomConnected(room);
+      if (!connectedNow) {
+        setError("Voice engine is reconnecting. Retry screen share in a moment.");
+        return false;
+      }
     }
 
     try {
       const config = buildScreenShareConfig(streamStartOptions);
 
       try {
-        await roomRef.current.localParticipant.setScreenShareEnabled(
+        await room.localParticipant.setScreenShareEnabled(
           true,
           config.captureOptions,
           config.publishOptions,
         );
       } catch (reason) {
+        if (isEngineNotConnectedTimeoutError(reason)) {
+          setError("Screen share delayed while voice reconnects. Please try again.");
+          setSharing(false);
+          return false;
+        }
+
         if (!config.fallback) {
           throw reason;
         }
 
-        await roomRef.current.localParticipant.setScreenShareEnabled(
+        await room.localParticipant.setScreenShareEnabled(
           true,
           config.fallback.captureOptions,
           config.fallback.publishOptions,
@@ -991,7 +1100,7 @@ export function useRoomMediaController(
       const message =
         reason instanceof Error ? reason.message : "Failed to start screen share.";
       setError(message);
-      setSharing(roomRef.current.localParticipant.isScreenShareEnabled);
+      setSharing(room.localParticipant.isScreenShareEnabled);
       return false;
     }
   };

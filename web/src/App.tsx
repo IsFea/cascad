@@ -32,8 +32,8 @@ import { alpha } from "@mui/material/styles";
 import AddReactionIcon from "@mui/icons-material/AddReaction";
 import LogoutIcon from "@mui/icons-material/Logout";
 import SendIcon from "@mui/icons-material/Send";
-import { HubConnectionBuilder, LogLevel } from "@microsoft/signalr";
-import { FormEvent, MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { HubConnection, HubConnectionBuilder, HubConnectionState, LogLevel } from "@microsoft/signalr";
+import { FormEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EmbeddedVoiceControls,
   EmbeddedVoiceStage,
@@ -63,9 +63,13 @@ import {
   isVoiceEarconCooldownPassed,
   normalizeVoicePresenceChangedEvent,
   patchWorkspaceMembersVoiceState,
+  resolveLocalConnectEarconType,
   resolveVoiceEarconType,
+  shouldPlayLocalDisconnectEarcon,
+  shouldStartConnectingEarconLoop,
   VoiceEarconType,
 } from "./voicePresence";
+import { getSafeImageUrl, markImageUrlBroken } from "./imageUrlFallback";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
 const TOKEN_KEY = "cascad_app_token";
@@ -73,11 +77,62 @@ const VOICE_TAB_INSTANCE_KEY = "cascad_voice_tab_instance_id";
 const AVATAR_CANVAS_SIZE = 256;
 
 const EMOJI_SET = ["😀", "😂", "😎", "🥳", "❤️", "🔥", "👍", "👏", "👀", "✅", "🎯", "🚀"];
-const EARCON_NOTE_MS = 85;
-const EARCON_GAP_MS = 25;
-const EARCON_MASTER_GAIN = 0.022;
 const EARCON_ATTACK_MS = 10;
 const EARCON_RELEASE_MS = 28;
+const CONNECTING_EARCON_INTERVAL_MS = 1800;
+const EARCON_GAIN_BOOST: Record<VoiceEarconType, number> = {
+  join: 1.65,
+  leave: 1.65,
+  connect: 1.75,
+  connecting: 1.35,
+  disconnect: 1.65,
+};
+
+type EarconProfile = {
+  frequencies: number[];
+  noteMs: number;
+  gapMs: number;
+  gain: number;
+  tailMs: number;
+};
+
+const EARCON_PROFILES: Record<VoiceEarconType, EarconProfile> = {
+  join: {
+    frequencies: [740, 932],
+    noteMs: 85,
+    gapMs: 25,
+    gain: 0.022,
+    tailMs: 60,
+  },
+  leave: {
+    frequencies: [932, 740],
+    noteMs: 85,
+    gapMs: 25,
+    gain: 0.022,
+    tailMs: 60,
+  },
+  connect: {
+    frequencies: [660, 740],
+    noteMs: 70,
+    gapMs: 20,
+    gain: 0.016,
+    tailMs: 50,
+  },
+  connecting: {
+    frequencies: [700],
+    noteMs: 66,
+    gapMs: 0,
+    gain: 0.014,
+    tailMs: 40,
+  },
+  disconnect: {
+    frequencies: [660, 554],
+    noteMs: 76,
+    gapMs: 20,
+    gain: 0.018,
+    tailMs: 55,
+  },
+};
 
 const theme = createTheme({
   palette: {
@@ -249,19 +304,24 @@ async function playVoiceEarcon(context: AudioContext, type: VoiceEarconType) {
     return;
   }
 
+  const profile = EARCON_PROFILES[type];
   const baseTime = context.currentTime + 0.002;
-  const noteDurationSec = EARCON_NOTE_MS / 1000;
-  const gapSec = EARCON_GAP_MS / 1000;
-  const frequencies = type === "join" ? [740, 932] : [932, 740];
+  const noteDurationSec = profile.noteMs / 1000;
+  const gapSec = profile.gapMs / 1000;
 
   const masterGain = context.createGain();
-  masterGain.gain.setValueAtTime(EARCON_MASTER_GAIN, baseTime);
+  masterGain.gain.setValueAtTime(profile.gain * EARCON_GAIN_BOOST[type], baseTime);
   masterGain.connect(context.destination);
 
-  scheduleEarconNote(context, masterGain, baseTime, frequencies[0], noteDurationSec);
-  scheduleEarconNote(context, masterGain, baseTime + noteDurationSec + gapSec, frequencies[1], noteDurationSec);
+  profile.frequencies.forEach((frequency, index) => {
+    const offset = index * (noteDurationSec + gapSec);
+    scheduleEarconNote(context, masterGain, baseTime + offset, frequency, noteDurationSec);
+  });
 
-  const endTime = baseTime + noteDurationSec * 2 + gapSec + 0.06;
+  const notesCount = profile.frequencies.length;
+  const totalNotesDuration = notesCount * noteDurationSec;
+  const totalGapDuration = Math.max(0, notesCount - 1) * gapSec;
+  const endTime = baseTime + totalNotesDuration + totalGapDuration + profile.tailMs / 1000;
   masterGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
 }
 
@@ -529,7 +589,8 @@ function WorkspaceShell(props: {
     muted: boolean;
     sharing: boolean;
     connected: boolean;
-  }>({ muted: false, sharing: false, connected: false });
+    connectionError: boolean;
+  }>({ muted: false, sharing: false, connected: false, connectionError: false });
   const voiceControlActionsRef = useRef<{
     toggleMute: () => Promise<void>;
     toggleShare: () => Promise<void>;
@@ -567,10 +628,20 @@ function WorkspaceShell(props: {
   const [participantMenuRequest, setParticipantMenuRequest] = useState<ParticipantMenuRequest | null>(null);
 
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
-  const hubRef = useRef<ReturnType<HubConnectionBuilder["build"]> | null>(null);
+  const hubRef = useRef<HubConnection | null>(null);
   const participantMenuSeqRef = useRef(1);
   const voiceEarconContextRef = useRef<AudioContext | null>(null);
   const lastVoiceEarconAtRef = useRef(0);
+  const lastLocalDisconnectEarconAtRef = useRef(-Infinity);
+  const previousConnectedVoiceChannelIdRef = useRef<string | null>(null);
+  const previousVoiceEngineConnectedRef = useRef(false);
+  const selectedTextChannelIdRef = useRef<string | null>(null);
+  const connectedVoiceChannelIdRef = useRef<string | null>(null);
+  const workspaceIdRef = useRef<string | null>(null);
+  const currentUserIdRef = useRef(props.currentUser.id);
+  const joinedWorkspaceIdRef = useRef<string | null>(null);
+  const joinedTextChannelIdRef = useRef<string | null>(null);
+  const joinedVoiceChannelIdRef = useRef<string | null>(null);
   const tabInstanceId = useMemo(() => {
     const existing = sessionStorage.getItem(VOICE_TAB_INSTANCE_KEY);
     if (existing) {
@@ -586,6 +657,13 @@ function WorkspaceShell(props: {
   useEffect(() => {
     setCurrentAvatarUrl(props.currentUser.avatarUrl);
   }, [props.currentUser.avatarUrl]);
+
+  useEffect(() => {
+    selectedTextChannelIdRef.current = selectedTextChannelId;
+    connectedVoiceChannelIdRef.current = connectedVoiceChannelId;
+    workspaceIdRef.current = workspaceId;
+    currentUserIdRef.current = props.currentUser.id;
+  }, [selectedTextChannelId, connectedVoiceChannelId, workspaceId, props.currentUser.id]);
 
   useEffect(() => {
     return () => {
@@ -814,18 +892,110 @@ function WorkspaceShell(props: {
   }, [connectedVoiceChannelId]);
 
   useEffect(() => {
+    const localConnectEarconType = resolveLocalConnectEarconType(
+      previousVoiceEngineConnectedRef.current,
+      voiceControlState.connected,
+    );
+
+    if (localConnectEarconType && voiceSession) {
+      tryPlayVoiceEarcon(localConnectEarconType);
+    }
+
+    previousVoiceEngineConnectedRef.current = voiceControlState.connected;
+  }, [voiceControlState.connected, voiceSession?.sessionInstanceId]);
+
+  useEffect(() => {
+    if (
+      !shouldStartConnectingEarconLoop(
+        Boolean(voiceSession),
+        voiceControlState.connected,
+        voiceControlState.connectionError,
+      )
+    ) {
+      return;
+    }
+
+    tryPlayVoiceEarcon("connecting");
+    const intervalId = window.setInterval(() => {
+      tryPlayVoiceEarcon("connecting");
+    }, CONNECTING_EARCON_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [voiceControlState.connected, voiceControlState.connectionError, voiceSession?.sessionInstanceId]);
+
+  useEffect(() => {
+    const previousConnectedVoiceChannelId = previousConnectedVoiceChannelIdRef.current;
+    const nowMs = performance.now();
+    if (
+      shouldPlayLocalDisconnectEarcon(
+        previousConnectedVoiceChannelId,
+        connectedVoiceChannelId,
+        nowMs,
+        lastLocalDisconnectEarconAtRef.current,
+      )
+    ) {
+      lastLocalDisconnectEarconAtRef.current = nowMs;
+      tryPlayVoiceEarcon("disconnect");
+    }
+
+    previousConnectedVoiceChannelIdRef.current = connectedVoiceChannelId;
+  }, [connectedVoiceChannelId]);
+
+  const syncHubGroups = useCallback(async (hub: HubConnection) => {
+    if (hub.state !== HubConnectionState.Connected) {
+      return;
+    }
+
+    const nextWorkspaceId = workspaceIdRef.current;
+    const nextTextChannelId = selectedTextChannelIdRef.current;
+    const nextVoiceChannelId = connectedVoiceChannelIdRef.current;
+
+    if (joinedWorkspaceIdRef.current && joinedWorkspaceIdRef.current !== nextWorkspaceId) {
+      await hub.invoke("LeaveWorkspace", joinedWorkspaceIdRef.current).catch(() => undefined);
+      joinedWorkspaceIdRef.current = null;
+    }
+    if (nextWorkspaceId && joinedWorkspaceIdRef.current !== nextWorkspaceId) {
+      await hub.invoke("JoinWorkspace", nextWorkspaceId).catch(() => undefined);
+      joinedWorkspaceIdRef.current = nextWorkspaceId;
+    }
+
+    if (joinedTextChannelIdRef.current && joinedTextChannelIdRef.current !== nextTextChannelId) {
+      await hub.invoke("LeaveTextChannel", joinedTextChannelIdRef.current).catch(() => undefined);
+      joinedTextChannelIdRef.current = null;
+    }
+    if (nextTextChannelId && joinedTextChannelIdRef.current !== nextTextChannelId) {
+      await hub.invoke("JoinTextChannel", nextTextChannelId).catch(() => undefined);
+      joinedTextChannelIdRef.current = nextTextChannelId;
+    }
+
+    if (joinedVoiceChannelIdRef.current && joinedVoiceChannelIdRef.current !== nextVoiceChannelId) {
+      await hub.invoke("LeaveVoiceChannel", joinedVoiceChannelIdRef.current).catch(() => undefined);
+      joinedVoiceChannelIdRef.current = null;
+    }
+    if (nextVoiceChannelId && joinedVoiceChannelIdRef.current !== nextVoiceChannelId) {
+      await hub.invoke("JoinVoiceChannel", nextVoiceChannelId).catch(() => undefined);
+      joinedVoiceChannelIdRef.current = nextVoiceChannelId;
+    }
+  }, []);
+
+  useEffect(() => {
     const hub = new HubConnectionBuilder()
       .withUrl(`${API_BASE.replace(/\/api$/, "")}/hubs/chat`, {
         accessTokenFactory: () => props.token,
       })
       .withAutomaticReconnect()
-      .configureLogging(LogLevel.Warning)
+      .configureLogging(LogLevel.Error)
       .build();
 
     hubRef.current = hub;
+    joinedWorkspaceIdRef.current = null;
+    joinedTextChannelIdRef.current = null;
+    joinedVoiceChannelIdRef.current = null;
 
     hub.on("textMessage", (message: ChannelMessageDto) => {
-      if (message.channelId === selectedTextChannelId) {
+      if (message.channelId === selectedTextChannelIdRef.current) {
         setMessages((current) => [...current, message]);
       }
     });
@@ -833,7 +1003,7 @@ function WorkspaceShell(props: {
     hub.on(
       "voiceMessage",
       (message: { channelId: string; userId: string; username: string; content: string; createdAtUtc: string }) => {
-        if (message.channelId === connectedVoiceChannelId) {
+        if (message.channelId === connectedVoiceChannelIdRef.current) {
           setLiveVoiceMessages((current) => [...current.slice(-80), message]);
         }
       },
@@ -845,7 +1015,8 @@ function WorkspaceShell(props: {
         return;
       }
 
-      if (!workspaceId || event.workspaceId !== workspaceId) {
+      const currentWorkspaceId = workspaceIdRef.current;
+      if (!currentWorkspaceId || event.workspaceId !== currentWorkspaceId) {
         return;
       }
 
@@ -865,7 +1036,20 @@ function WorkspaceShell(props: {
         };
       });
 
-      const earconType = resolveVoiceEarconType(event, connectedVoiceChannelId, props.currentUser.id);
+      if (
+        event.userId === currentUserIdRef.current &&
+        connectedVoiceChannelIdRef.current &&
+        event.previousVoiceChannelId === connectedVoiceChannelIdRef.current &&
+        event.currentVoiceChannelId === null
+      ) {
+        clearVoiceClientState();
+      }
+
+      const earconType = resolveVoiceEarconType(
+        event,
+        connectedVoiceChannelIdRef.current,
+        currentUserIdRef.current,
+      );
       if (!earconType) {
         return;
       }
@@ -876,22 +1060,33 @@ function WorkspaceShell(props: {
     void hub
       .start()
       .then(async () => {
-        if (workspaceId) {
-          await hub.invoke("JoinWorkspace", workspaceId);
-        }
-        if (selectedTextChannelId) {
-          await hub.invoke("JoinTextChannel", selectedTextChannelId);
-        }
-        if (connectedVoiceChannelId) {
-          await hub.invoke("JoinVoiceChannel", connectedVoiceChannelId);
-        }
+        await syncHubGroups(hub);
       })
       .catch(() => undefined);
 
+    hub.onreconnected(() => {
+      void syncHubGroups(hub);
+    });
+
     return () => {
+      if (hubRef.current === hub) {
+        hubRef.current = null;
+      }
+      joinedWorkspaceIdRef.current = null;
+      joinedTextChannelIdRef.current = null;
+      joinedVoiceChannelIdRef.current = null;
       void hub.stop();
     };
-  }, [props.token, selectedTextChannelId, connectedVoiceChannelId, workspaceId]);
+  }, [props.token, syncHubGroups]);
+
+  useEffect(() => {
+    const hub = hubRef.current;
+    if (!hub || hub.state !== HubConnectionState.Connected) {
+      return;
+    }
+
+    void syncHubGroups(hub);
+  }, [connectedVoiceChannelId, selectedTextChannelId, syncHubGroups, workspaceId]);
 
   useEffect(() => {
     if (!connectedVoiceChannelId || !voiceSession?.sessionInstanceId) {
@@ -1041,7 +1236,7 @@ function WorkspaceShell(props: {
     setVoiceSession(null);
     voiceControlActionsRef.current = null;
     autoMutedByDeafenRef.current = false;
-    setVoiceControlState({ muted: false, sharing: false, connected: false });
+    setVoiceControlState({ muted: false, sharing: false, connected: false, connectionError: false });
     setSelfMuted(false);
     setSelfDeafened(false);
     setSpeakingUserIds(new Set());
@@ -1356,7 +1551,7 @@ function WorkspaceShell(props: {
   const handleVoiceControlsChange = (controls: EmbeddedVoiceControls | null) => {
     if (!controls) {
       voiceControlActionsRef.current = null;
-      setVoiceControlState({ muted: false, sharing: false, connected: false });
+      setVoiceControlState({ muted: false, sharing: false, connected: false, connectionError: false });
       return;
     }
 
@@ -1370,7 +1565,8 @@ function WorkspaceShell(props: {
       if (
         current.muted === controls.muted &&
         current.sharing === controls.sharing &&
-        current.connected === controls.connected
+        current.connected === controls.connected &&
+        current.connectionError === controls.connectionError
       ) {
         return current;
       }
@@ -1378,6 +1574,7 @@ function WorkspaceShell(props: {
         muted: controls.muted,
         sharing: controls.sharing,
         connected: controls.connected,
+        connectionError: controls.connectionError,
       };
     });
   };
@@ -1633,7 +1830,12 @@ function WorkspaceShell(props: {
                   >
                     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
                       <Avatar
-                        src={message.avatarUrl ?? undefined}
+                        src={getSafeImageUrl(message.avatarUrl)}
+                        imgProps={{
+                          onError: () => {
+                            markImageUrlBroken(message.avatarUrl);
+                          },
+                        }}
                         sx={{ width: 24, height: 24, fontSize: "0.75rem" }}
                       >
                         {message.username[0]?.toUpperCase() ?? "?"}
@@ -1652,8 +1854,12 @@ function WorkspaceShell(props: {
                           <Box
                             key={attachment.id}
                             component="img"
-                            src={attachment.urlPath}
+                            src={getSafeImageUrl(attachment.urlPath)}
                             alt={attachment.originalFileName}
+                            onError={(event) => {
+                              markImageUrlBroken(attachment.urlPath);
+                              event.currentTarget.style.display = "none";
+                            }}
                             sx={{
                               width: 160,
                               height: 100,

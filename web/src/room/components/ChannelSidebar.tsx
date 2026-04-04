@@ -29,6 +29,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import { getSafeImageUrl, markImageUrlBroken } from "../../imageUrlFallback";
 import { ChannelDto, UserDto, WorkspaceMemberDto } from "../../types";
 import { initials } from "../utils";
 
@@ -208,7 +209,12 @@ export function ChannelSidebar(props: {
                         >
                           <ListItemAvatar sx={{ minWidth: 26 }}>
                             <Avatar
-                              src={participant.avatarUrl ?? undefined}
+                              src={getSafeImageUrl(participant.avatarUrl)}
+                              imgProps={{
+                                onError: () => {
+                                  markImageUrlBroken(participant.avatarUrl);
+                                },
+                              }}
                               sx={{
                                 width: 18,
                                 height: 18,
@@ -397,7 +403,15 @@ export function ChannelSidebar(props: {
             aria-label="Update avatar"
             onClick={props.onPickAvatar}
           >
-            <Avatar src={props.currentAvatarUrl ?? undefined} sx={{ width: 30, height: 30 }}>
+            <Avatar
+              src={getSafeImageUrl(props.currentAvatarUrl)}
+              imgProps={{
+                onError: () => {
+                  markImageUrlBroken(props.currentAvatarUrl);
+                },
+              }}
+              sx={{ width: 30, height: 30 }}
+            >
               {initials(props.currentUser.username)}
             </Avatar>
           </IconButton>

@@ -1,8 +1,9 @@
 import { VoicePresenceChangedEvent, WorkspaceMemberDto } from "./types";
 
-export type VoiceEarconType = "join" | "leave";
+export type VoiceEarconType = "join" | "leave" | "connect" | "connecting" | "disconnect";
 
 export const VOICE_EARCON_COOLDOWN_MS = 350;
+export const VOICE_DISCONNECT_EARCON_DEDUPE_MS = 900;
 
 export function patchWorkspaceMembersVoiceState(
   members: WorkspaceMemberDto[],
@@ -55,6 +56,35 @@ export function resolveVoiceEarconType(
   }
 
   return null;
+}
+
+export function resolveLocalConnectEarconType(
+  wasConnected: boolean,
+  isConnected: boolean,
+): VoiceEarconType | null {
+  return !wasConnected && isConnected ? "connect" : null;
+}
+
+export function shouldStartConnectingEarconLoop(
+  hasVoiceSession: boolean,
+  isConnected: boolean,
+  hasConnectionError: boolean,
+): boolean {
+  return hasVoiceSession && !isConnected && !hasConnectionError;
+}
+
+export function shouldPlayLocalDisconnectEarcon(
+  previousConnectedVoiceChannelId: string | null,
+  nextConnectedVoiceChannelId: string | null,
+  nowMs: number,
+  lastPlayedAtMs: number,
+  dedupeMs = VOICE_DISCONNECT_EARCON_DEDUPE_MS,
+): boolean {
+  if (!previousConnectedVoiceChannelId || nextConnectedVoiceChannelId !== null) {
+    return false;
+  }
+
+  return nowMs - lastPlayedAtMs >= dedupeMs;
 }
 
 export function isVoiceEarconCooldownPassed(

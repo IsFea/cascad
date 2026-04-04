@@ -34,6 +34,20 @@ test("room smoke: join + settings + panel tabs", async ({ page }) => {
   await expect(page.getByText("Participants (")).toBeVisible();
 });
 
+test("room smoke: share dialog opens with stream options", async ({ page }) => {
+  await joinRoom(page);
+
+  await page.getByRole("button", { name: "Share Screen" }).click();
+  await expect(page.getByRole("heading", { name: "Start Screen Share" })).toBeVisible();
+  await expect(page.getByLabel("Resolution")).toBeVisible();
+  await expect(page.getByLabel("FPS")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Mode" })).toBeVisible();
+  await expect(page.getByLabel("Include system audio")).toBeVisible();
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("heading", { name: "Start Screen Share" })).toHaveCount(0);
+});
+
 test("room smoke: layout modes and theater hide side panel", async ({ page }) => {
   await joinRoom(page);
 
@@ -46,4 +60,20 @@ test("room smoke: layout modes and theater hide side panel", async ({ page }) =>
 
   await page.getByRole("button", { name: "Grid layout" }).click();
   await expect(page.getByText("Grid", { exact: true })).toBeVisible();
+});
+
+test("room smoke: participants panel collapse and expand", async ({ page }) => {
+  await joinRoom(page);
+
+  await page
+    .getByRole("banner")
+    .getByRole("button", { name: "Collapse participants panel" })
+    .click();
+  await expect(page.getByRole("tab", { name: "Participants" })).toHaveCount(0);
+
+  await page
+    .getByRole("banner")
+    .getByRole("button", { name: "Open participants panel" })
+    .click();
+  await expect(page.getByRole("tab", { name: "Participants" })).toBeVisible();
 });

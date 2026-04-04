@@ -1,6 +1,5 @@
 import {
   ScreenShareCaptureOptions,
-  ScreenSharePresets,
   Track,
   TrackPublishOptions,
 } from "livekit-client";
@@ -50,140 +49,44 @@ export type MicTrackOptions = {
   voiceIsolation?: boolean;
 };
 
-export type StreamPresetId =
-  | "balanced_720p30"
-  | "game_1080p30"
-  | "game_plus_1080p60"
-  | "text_1080p15";
+export type StreamResolutionPreset = "720p" | "1080p";
 
-export type StreamPreset = {
-  id: StreamPresetId;
-  label: string;
-  description: string;
+export type StreamFpsPreset = 15 | 30 | 60;
+
+export type StreamContentMode = "game" | "text";
+
+export type StreamStartOptions = {
+  resolution: StreamResolutionPreset;
+  fps: StreamFpsPreset;
+  mode: StreamContentMode;
+  includeSystemAudio: boolean;
+};
+
+export type StreamShareConfig = {
   captureOptions: ScreenShareCaptureOptions;
   publishOptions: TrackPublishOptions;
-  fallbackPresetId?: StreamPresetId;
+  fallback?: {
+    captureOptions: ScreenShareCaptureOptions;
+    publishOptions: TrackPublishOptions;
+    notice: string;
+  };
 };
 
 export const DEFAULT_DSP_SETTINGS: DspSettings = {
-  echoCancellation: true,
+  echoCancellation: false,
   noiseSuppression: true,
-  autoGainControl: true,
+  autoGainControl: false,
   voiceIsolation: false,
 };
 
-export const STREAM_PRESETS: Record<StreamPresetId, StreamPreset> = {
-  balanced_720p30: {
-    id: "balanced_720p30",
-    label: "720p30 (Balanced)",
-    description: "Balanced quality for most sessions.",
-    captureOptions: {
-      resolution: {
-        ...ScreenSharePresets.h720fps30.resolution,
-        frameRate: 30,
-      },
-      contentHint: "detail",
-      systemAudio: "include",
-      selfBrowserSurface: "include",
-      surfaceSwitching: "include",
-    },
-    publishOptions: {
-      source: Track.Source.ScreenShare,
-      screenShareEncoding: {
-        ...ScreenSharePresets.h720fps30.encoding,
-        maxFramerate: 30,
-      },
-      videoEncoding: {
-        ...ScreenSharePresets.h720fps30.encoding,
-        maxFramerate: 30,
-      },
-      simulcast: true,
-    },
-  },
-  game_1080p30: {
-    id: "game_1080p30",
-    label: "1080p30 (Game)",
-    description: "Higher detail and smooth gameplay motion.",
-    captureOptions: {
-      resolution: {
-        ...ScreenSharePresets.h1080fps30.resolution,
-        frameRate: 30,
-      },
-      contentHint: "motion",
-      systemAudio: "include",
-      selfBrowserSurface: "include",
-      surfaceSwitching: "include",
-    },
-    publishOptions: {
-      source: Track.Source.ScreenShare,
-      screenShareEncoding: {
-        ...ScreenSharePresets.h1080fps30.encoding,
-        maxFramerate: 30,
-      },
-      videoEncoding: {
-        ...ScreenSharePresets.h1080fps30.encoding,
-        maxFramerate: 30,
-      },
-      simulcast: true,
-    },
-  },
-  game_plus_1080p60: {
-    id: "game_plus_1080p60",
-    label: "1080p60 (Game+)",
-    description: "Fastest preset for motion-heavy games (falls back to 1080p30).",
-    captureOptions: {
-      resolution: {
-        width: 1920,
-        height: 1080,
-        frameRate: 60,
-      },
-      contentHint: "motion",
-      systemAudio: "include",
-      selfBrowserSurface: "include",
-      surfaceSwitching: "include",
-    },
-    publishOptions: {
-      source: Track.Source.ScreenShare,
-      screenShareEncoding: {
-        maxBitrate: 8_000_000,
-        maxFramerate: 60,
-      },
-      videoEncoding: {
-        maxBitrate: 8_000_000,
-        maxFramerate: 60,
-      },
-      simulcast: true,
-    },
-    fallbackPresetId: "game_1080p30",
-  },
-  text_1080p15: {
-    id: "text_1080p15",
-    label: "1080p15 (Text)",
-    description: "Best readability for text and documents.",
-    captureOptions: {
-      resolution: {
-        ...ScreenSharePresets.h1080fps15.resolution,
-        frameRate: 15,
-      },
-      contentHint: "text",
-      systemAudio: "exclude",
-      selfBrowserSurface: "include",
-      surfaceSwitching: "include",
-    },
-    publishOptions: {
-      source: Track.Source.ScreenShare,
-      screenShareEncoding: {
-        ...ScreenSharePresets.h1080fps15.encoding,
-        maxFramerate: 15,
-      },
-      videoEncoding: {
-        ...ScreenSharePresets.h1080fps15.encoding,
-        maxFramerate: 15,
-      },
-      simulcast: true,
-    },
-  },
+export const DEFAULT_STREAM_START_OPTIONS: StreamStartOptions = {
+  resolution: "1080p",
+  fps: 30,
+  mode: "game",
+  includeSystemAudio: true,
 };
+
+export const STREAM_VIDEO_OBJECT_FIT = "contain" as const;
 
 export function createInitialLayoutState(): StreamLayoutState {
   return {
@@ -374,4 +277,224 @@ export function restoreStreamIdentity(
   const next = { ...hidden };
   delete next[identity];
   return next;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+export function computeGridPageSize(width: number, height: number): number {
+  if (width <= 0 || height <= 0) {
+    return 1;
+  }
+
+  const minTileWidth = 280;
+  const minTileHeight = 180;
+
+  const columns = Math.max(1, Math.floor(width / minTileWidth));
+  const rows = Math.max(1, Math.floor(height / minTileHeight));
+
+  return columns * rows;
+}
+
+export function computeFilmstripPageSize(width: number): number {
+  if (width <= 0) {
+    return 1;
+  }
+
+  const minTileWidth = 170;
+  return Math.max(1, Math.floor(width / minTileWidth));
+}
+
+export function shouldCenterFilmstrip(
+  visibleItemsOnPage: number,
+  pageSize: number,
+): boolean {
+  return visibleItemsOnPage > 0 && visibleItemsOnPage < Math.max(1, pageSize);
+}
+
+export function paginateItems<T>(
+  items: T[],
+  page: number,
+  pageSize: number,
+): {
+  items: T[];
+  currentPage: number;
+  totalPages: number;
+} {
+  if (items.length === 0) {
+    return {
+      items: [],
+      currentPage: 1,
+      totalPages: 1,
+    };
+  }
+
+  const safePageSize = Math.max(1, pageSize);
+  const totalPages = Math.max(1, Math.ceil(items.length / safePageSize));
+  const currentPage = clamp(page, 1, totalPages);
+  const start = (currentPage - 1) * safePageSize;
+
+  return {
+    items: items.slice(start, start + safePageSize),
+    currentPage,
+    totalPages,
+  };
+}
+
+function bitrateByPreset(
+  resolution: StreamResolutionPreset,
+  fps: StreamFpsPreset,
+): number {
+  if (resolution === "720p") {
+    if (fps === 60) {
+      return 5_500_000;
+    }
+
+    if (fps === 30) {
+      return 4_000_000;
+    }
+
+    return 2_500_000;
+  }
+
+  if (fps === 60) {
+    return 8_000_000;
+  }
+
+  if (fps === 30) {
+    return 6_000_000;
+  }
+
+  return 4_000_000;
+}
+
+function resolutionByPreset(
+  resolution: StreamResolutionPreset,
+): { width: number; height: number } {
+  return resolution === "1080p"
+    ? { width: 1920, height: 1080 }
+    : { width: 1280, height: 720 };
+}
+
+export function buildScreenShareConfig(
+  options: StreamStartOptions,
+): StreamShareConfig {
+  const fps = options.fps;
+  const resolution = resolutionByPreset(options.resolution);
+  const maxBitrate = bitrateByPreset(options.resolution, fps);
+  const contentHint = options.mode === "text" ? "text" : "motion";
+  const systemAudio = options.includeSystemAudio ? "include" : "exclude";
+
+  const baseCaptureOptions: ScreenShareCaptureOptions = {
+    resolution: {
+      width: resolution.width,
+      height: resolution.height,
+      frameRate: fps,
+    },
+    contentHint,
+    systemAudio,
+    selfBrowserSurface: "include",
+    surfaceSwitching: "include",
+    audio: options.includeSystemAudio,
+  };
+
+  const basePublishOptions: TrackPublishOptions = {
+    source: Track.Source.ScreenShare,
+    screenShareEncoding: {
+      maxBitrate,
+      maxFramerate: fps,
+    },
+    videoEncoding: {
+      maxBitrate,
+      maxFramerate: fps,
+    },
+    simulcast: true,
+  };
+
+  if (fps < 60) {
+    return {
+      captureOptions: baseCaptureOptions,
+      publishOptions: basePublishOptions,
+    };
+  }
+
+  const fallbackFps: StreamFpsPreset = 30;
+  const fallbackBitrate = bitrateByPreset(options.resolution, fallbackFps);
+
+  return {
+    captureOptions: baseCaptureOptions,
+    publishOptions: basePublishOptions,
+    fallback: {
+      captureOptions: {
+        ...baseCaptureOptions,
+        resolution: {
+          width: resolution.width,
+          height: resolution.height,
+          frameRate: fallbackFps,
+        },
+      },
+      publishOptions: {
+        ...basePublishOptions,
+        screenShareEncoding: {
+          maxBitrate: fallbackBitrate,
+          maxFramerate: fallbackFps,
+        },
+        videoEncoding: {
+          maxBitrate: fallbackBitrate,
+          maxFramerate: fallbackFps,
+        },
+      },
+      notice: "60 FPS is not supported in this browser. Fallback to 30 FPS.",
+    },
+  };
+}
+
+export function resolvePlaybackLevels(
+  requestedVolume: number,
+  hasBoostPath: boolean,
+): {
+  elementVolume: number;
+  gainValue: number;
+  boosted: boolean;
+} {
+  const requested = clamp(requestedVolume, 0, 2);
+
+  if (hasBoostPath) {
+    return {
+      elementVolume: 1,
+      gainValue: requested,
+      boosted: requested > 1,
+    };
+  }
+
+  return {
+    elementVolume: clamp(requested, 0, 1),
+    gainValue: 1,
+    boosted: false,
+  };
+}
+
+export function resolveActivityWithHold(
+  level: number,
+  threshold: number,
+  nowMs: number,
+  prevActiveUntilMs: number | undefined,
+  holdMs: number,
+): {
+  isActive: boolean;
+  activeUntilMs: number | undefined;
+} {
+  if (level >= threshold) {
+    return {
+      isActive: true,
+      activeUntilMs: nowMs + holdMs,
+    };
+  }
+
+  const activeUntilMs = prevActiveUntilMs;
+  return {
+    isActive: (activeUntilMs ?? 0) > nowMs,
+    activeUntilMs,
+  };
 }

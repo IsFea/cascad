@@ -2,12 +2,21 @@ import { describe, expect, it } from "vitest";
 import { Track } from "livekit-client";
 import {
   buildMicTrackOptions,
+  buildScreenShareConfig,
+  computeFilmstripPageSize,
+  computeGridPageSize,
   createInitialLayoutState,
+  DEFAULT_DSP_SETTINGS,
   getAudioChannelForSource,
   getEffectiveStreamMode,
   hideStreamIdentity,
+  paginateItems,
+  resolveActivityWithHold,
   resolveFocusedStreamSid,
+  resolvePlaybackLevels,
   restoreStreamIdentity,
+  shouldCenterFilmstrip,
+  STREAM_VIDEO_OBJECT_FIT,
   streamLayoutReducer,
   withoutVoiceIsolation,
 } from "./roomState";
@@ -81,5 +90,100 @@ describe("roomState:buildMicTrackOptions", () => {
     const fallback = withoutVoiceIsolation(options);
     expect(fallback.voiceIsolation).toBeUndefined();
     expect(fallback.deviceId).toEqual({ exact: "device-123" });
+  });
+
+  it("uses updated defaults (only noise suppression enabled)", () => {
+    expect(DEFAULT_DSP_SETTINGS.echoCancellation).toBe(false);
+    expect(DEFAULT_DSP_SETTINGS.noiseSuppression).toBe(true);
+    expect(DEFAULT_DSP_SETTINGS.autoGainControl).toBe(false);
+    expect(DEFAULT_DSP_SETTINGS.voiceIsolation).toBe(false);
+  });
+});
+
+describe("roomState:pagination", () => {
+  it("computes adaptive page sizes", () => {
+    expect(computeGridPageSize(1200, 600)).toBeGreaterThan(1);
+    expect(computeFilmstripPageSize(980)).toBeGreaterThan(1);
+  });
+
+  it("paginates and clamps page", () => {
+    const result = paginateItems([1, 2, 3, 4, 5], 3, 2);
+    expect(result.totalPages).toBe(3);
+    expect(result.currentPage).toBe(3);
+    expect(result.items).toEqual([5]);
+  });
+
+  it("centers focus filmstrip only when page has fewer items than capacity", () => {
+    expect(shouldCenterFilmstrip(2, 4)).toBe(true);
+    expect(shouldCenterFilmstrip(4, 4)).toBe(false);
+    expect(shouldCenterFilmstrip(0, 4)).toBe(false);
+  });
+});
+
+describe("roomState:screenShareConfig", () => {
+  it("maps dialog options to capture/publish config", () => {
+    const config = buildScreenShareConfig({
+      resolution: "1080p",
+      fps: 30,
+      mode: "game",
+      includeSystemAudio: true,
+    });
+
+    expect(config.captureOptions.resolution?.width).toBe(1920);
+    expect(config.captureOptions.contentHint).toBe("motion");
+    expect(config.captureOptions.audio).toBe(true);
+    expect(config.publishOptions.videoEncoding?.maxFramerate).toBe(30);
+    expect(config.fallback).toBeUndefined();
+  });
+
+  it("creates fallback for 60fps", () => {
+    const config = buildScreenShareConfig({
+      resolution: "1080p",
+      fps: 60,
+      mode: "game",
+      includeSystemAudio: true,
+    });
+
+    expect(config.publishOptions.videoEncoding?.maxFramerate).toBe(60);
+    expect(config.fallback?.publishOptions.videoEncoding?.maxFramerate).toBe(30);
+  });
+});
+
+describe("roomState:resolvePlaybackLevels", () => {
+  it("uses gain path for >100% when supported", () => {
+    const boosted = resolvePlaybackLevels(1.75, true);
+    expect(boosted.elementVolume).toBe(1);
+    expect(boosted.gainValue).toBe(1.75);
+    expect(boosted.boosted).toBe(true);
+  });
+
+  it("caps to 100% when gain path is unsupported", () => {
+    const capped = resolvePlaybackLevels(1.75, false);
+    expect(capped.elementVolume).toBe(1);
+    expect(capped.gainValue).toBe(1);
+    expect(capped.boosted).toBe(false);
+  });
+});
+
+describe("roomState:activity hold", () => {
+  it("keeps stream activity true while hold window is active", () => {
+    const now = 1000;
+    const active = resolveActivityWithHold(0.05, 0.02, now, undefined, 700);
+    expect(active.isActive).toBe(true);
+    expect(active.activeUntilMs).toBe(1700);
+
+    const held = resolveActivityWithHold(0, 0.02, 1500, active.activeUntilMs, 700);
+    expect(held.isActive).toBe(true);
+  });
+
+  it("drops activity after hold window expiration", () => {
+    const dropped = resolveActivityWithHold(0, 0.02, 1801, 1700, 700);
+    expect(dropped.isActive).toBe(false);
+  });
+});
+
+describe("roomState:video fit", () => {
+  it("uses contain policy to avoid crop in stream tiles", () => {
+    expect(STREAM_VIDEO_OBJECT_FIT).toBe("contain");
   });
 });

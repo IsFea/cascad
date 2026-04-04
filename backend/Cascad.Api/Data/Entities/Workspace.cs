@@ -10,5 +10,8 @@ public sealed class Workspace
 
     public ICollection<WorkspaceMember> Members { get; set; } = new List<WorkspaceMember>();
 
+    public ICollection<VoiceModerationState> VoiceModerationStates { get; set; } =
+        new List<VoiceModerationState>();
+
     public ICollection<Channel> Channels { get; set; } = new List<Channel>();
 }

@@ -76,6 +76,17 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
 
             ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "SessionInstanceId" character varying(80) NOT NULL DEFAULT '';
 
+            CREATE TABLE IF NOT EXISTS "VoiceModerationStates" (
+                "WorkspaceId" uuid NOT NULL,
+                "UserId" uuid NOT NULL,
+                "IsServerMuted" boolean NOT NULL,
+                "IsServerDeafened" boolean NOT NULL,
+                "UpdatedAtUtc" timestamp with time zone NOT NULL,
+                CONSTRAINT "PK_VoiceModerationStates" PRIMARY KEY ("WorkspaceId", "UserId"),
+                CONSTRAINT "FK_VoiceModerationStates_Workspaces_WorkspaceId" FOREIGN KEY ("WorkspaceId") REFERENCES "Workspaces" ("Id") ON DELETE CASCADE,
+                CONSTRAINT "FK_VoiceModerationStates_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS "VoiceStreamPublications" (
                 "ChannelId" uuid NOT NULL,
                 "UserId" uuid NOT NULL,
@@ -124,6 +135,7 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
             CREATE INDEX IF NOT EXISTS "IX_Channels_WorkspaceId_Position" ON "Channels" ("WorkspaceId", "Position");
             CREATE UNIQUE INDEX IF NOT EXISTS "IX_Channels_LiveKitRoomName" ON "Channels" ("LiveKitRoomName") WHERE "LiveKitRoomName" IS NOT NULL;
             CREATE INDEX IF NOT EXISTS "IX_VoiceSessions_UserId" ON "VoiceSessions" ("UserId");
+            CREATE INDEX IF NOT EXISTS "IX_VoiceModerationStates_UserId" ON "VoiceModerationStates" ("UserId");
             CREATE INDEX IF NOT EXISTS "IX_VoiceStreamPublications_LastSeenAtUtc" ON "VoiceStreamPublications" ("LastSeenAtUtc");
             CREATE INDEX IF NOT EXISTS "IX_ChannelMessages_ChannelId_CreatedAtUtc" ON "ChannelMessages" ("ChannelId", "CreatedAtUtc");
             CREATE INDEX IF NOT EXISTS "IX_MessageAttachments_MessageId" ON "MessageAttachments" ("MessageId");

@@ -147,18 +147,36 @@ export function ChannelSidebar(props: {
         <List dense disablePadding>
           {props.voiceChannels.map((channel) => {
             const isConnected = props.connectedVoiceChannelId === channel.id;
+            const isOutlined = isConnected;
             const participants = membersByVoiceChannel[channel.id] ?? [];
             const maxParticipantsLabel = channel.maxParticipants ?? "∞";
 
             return (
-              <Box key={channel.id}>
+              <Box
+                key={channel.id}
+                sx={{
+                  borderRadius: 1.4,
+                  mb: 0.45,
+                  px: 0.35,
+                  pt: 0.3,
+                  pb: participants.length > 0 ? 0.35 : 0.2,
+                  border: isOutlined ? `1px solid ${alpha("#6da7ff", 0.55)}` : "1px solid transparent",
+                  bgcolor: isOutlined ? alpha("#6da7ff", 0.07) : "transparent",
+                  boxShadow: isOutlined
+                    ? `0 0 0 1px ${alpha("#6da7ff", 0.14)} inset, 0 6px 12px ${alpha("#10213e", 0.26)}`
+                    : "none",
+                  transition: "border-color 130ms ease, background-color 130ms ease, box-shadow 130ms ease",
+                }}
+              >
                 <ListItemButton
                   selected={props.selectedVoiceChannelId === channel.id}
-                  onClick={() => props.onSelectVoiceChannel(channel.id)}
-                  onDoubleClick={() => props.onConnectVoiceChannel(channel.id)}
+                  onClick={() => {
+                    props.onSelectVoiceChannel(channel.id);
+                    props.onConnectVoiceChannel(channel.id);
+                  }}
                   sx={{
                     borderRadius: 1.2,
-                    mb: 0.2,
+                    mb: 0,
                     "&.Mui-selected": {
                       bgcolor: alpha("#6da7ff", 0.16),
                     },
@@ -179,7 +197,7 @@ export function ChannelSidebar(props: {
                 </ListItemButton>
 
                 {participants.length > 0 && (
-                  <List dense disablePadding sx={{ ml: 2.8, mb: 0.4 }}>
+                  <List dense disablePadding sx={{ ml: 2.45, mt: 0.2, mb: 0 }}>
                     {participants.map((participant) => {
                       const isSpeaking = props.speakingUserIds.has(participant.userId);
                       return (

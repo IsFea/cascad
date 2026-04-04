@@ -99,7 +99,7 @@ test("workspace flow: approved user can login and send text message", async ({ p
   await expect(page.getByText("hello").first()).toBeVisible();
 });
 
-test("voice flow: double click connect and use left voice controls", async ({ page, request }) => {
+test("voice flow: single click connect and use left voice controls", async ({ page, request }) => {
   const username = `voice_${Date.now()}`;
   const password = `${username}12345`;
 
@@ -136,7 +136,7 @@ test("voice flow: double click connect and use left voice controls", async ({ pa
   expect(voice).toBeTruthy();
 
   const voiceButton = page.getByRole("button", { name: new RegExp(voice!.name, "i") }).first();
-  await voiceButton.dblclick();
+  await voiceButton.click();
 
   const voiceOnlineLabel = page.getByText("Voice online");
   const voiceConnectedLabel = page.getByText("Voice connected");

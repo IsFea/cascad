@@ -79,6 +79,7 @@ type UseRoomMediaControllerResult = {
   setLayoutMode: (mode: StreamLayoutMode) => void;
   setFocusedStream: (sid: string | null) => void;
   setPlaybackSuppressed: (value: boolean) => void;
+  setLocalMute: (nextMuted: boolean) => Promise<void>;
   toggleLocalMute: () => Promise<void>;
   startScreenShare: () => Promise<boolean>;
   stopScreenShare: () => Promise<void>;
@@ -1001,11 +1002,13 @@ export function useRoomMediaController(
     applyAudioSettings(identity);
   };
 
-  const toggleLocalMute = async () => {
-    const nextMuted = !muted;
-    setMuted(nextMuted);
+  const setLocalMute = async (nextMuted: boolean) => {
+    mutedRef.current = nextMuted;
+    setMuted((current) => (current === nextMuted ? current : nextMuted));
 
     if (!localAudioRef.current) {
+      const localIdentity = roomRef.current?.localParticipant.identity ?? session.user.id;
+      patchParticipant(localIdentity, { voiceMutedLocal: nextMuted });
       return;
     }
 
@@ -1020,6 +1023,10 @@ export function useRoomMediaController(
       setSourceActivity(localIdentity, "voice", false);
     }
     patchParticipant(localIdentity, { voiceMutedLocal: nextMuted });
+  };
+
+  const toggleLocalMute = async () => {
+    await setLocalMute(!mutedRef.current);
   };
 
   const hideStream = (identity: string) => {
@@ -1241,6 +1248,7 @@ export function useRoomMediaController(
     setLayoutMode,
     setFocusedStream,
     setPlaybackSuppressed,
+    setLocalMute,
     toggleLocalMute,
     startScreenShare,
     stopScreenShare,

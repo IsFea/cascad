@@ -21,6 +21,8 @@ function makeMember(overrides: Partial<WorkspaceMemberDto> = {}): WorkspaceMembe
     connectedVoiceChannelId: null,
     isMuted: false,
     isDeafened: false,
+    isServerMuted: false,
+    isServerDeafened: false,
     ...overrides,
   };
 }
@@ -35,6 +37,8 @@ function makeEvent(overrides: Partial<VoicePresenceChangedEvent> = {}): VoicePre
     currentVoiceChannelId: "v-1",
     isMuted: false,
     isDeafened: false,
+    isServerMuted: false,
+    isServerDeafened: false,
     occurredAtUtc: "2026-04-04T10:00:00.000Z",
     ...overrides,
   };
@@ -56,6 +60,8 @@ describe("voicePresence:patchWorkspaceMembersVoiceState", () => {
     expect(updated[0].connectedVoiceChannelId).toBe("v-2");
     expect(updated[0].isMuted).toBe(true);
     expect(updated[0].isDeafened).toBe(true);
+    expect(updated[0].isServerMuted).toBe(false);
+    expect(updated[0].isServerDeafened).toBe(false);
     expect(updated[1]).toEqual(members[1]);
   });
 
@@ -197,9 +203,26 @@ describe("voicePresence:normalizeVoicePresenceChangedEvent", () => {
       CurrentVoiceChannelId: "v-1",
       IsMuted: false,
       IsDeafened: false,
+      IsServerMuted: true,
+      IsServerDeafened: false,
       OccurredAtUtc: "2026-04-04T10:00:00.000Z",
     });
     expect(normalized?.workspaceId).toBe("w-1");
     expect(normalized?.currentVoiceChannelId).toBe("v-1");
+    expect(normalized?.isServerMuted).toBe(true);
+    expect(normalized?.isServerDeafened).toBe(false);
+  });
+
+  it("defaults missing server moderation fields to false", () => {
+    const normalized = normalizeVoicePresenceChangedEvent({
+      WorkspaceId: "w-1",
+      UserId: "u-1",
+      Username: "alice",
+      IsMuted: false,
+      IsDeafened: true,
+    });
+
+    expect(normalized?.isServerMuted).toBe(false);
+    expect(normalized?.isServerDeafened).toBe(false);
   });
 });

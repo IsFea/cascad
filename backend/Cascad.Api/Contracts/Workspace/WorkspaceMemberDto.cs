@@ -9,4 +9,6 @@ public sealed record WorkspaceMemberDto(
     string? AvatarUrl,
     Guid? ConnectedVoiceChannelId,
     bool IsMuted,
-    bool IsDeafened);
+    bool IsDeafened,
+    bool IsServerMuted,
+    bool IsServerDeafened);

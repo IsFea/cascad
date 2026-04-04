@@ -195,6 +195,10 @@ function isVoiceSessionReplacedError(reason: unknown) {
   return reason instanceof ApiProblemError && reason.status === 409 && reason.code === "VOICE_SESSION_REPLACED";
 }
 
+function isVoiceServerModeratedError(reason: unknown) {
+  return reason instanceof ApiProblemError && reason.status === 403 && reason.code === "VOICE_SERVER_MODERATED";
+}
+
 async function apiCall<TResponse>(
   path: string,
   method: "GET" | "POST" | "PUT" | "DELETE",
@@ -592,6 +596,7 @@ function WorkspaceShell(props: {
     connectionError: boolean;
   }>({ muted: false, sharing: false, connected: false, connectionError: false });
   const voiceControlActionsRef = useRef<{
+    setMuted: (muted: boolean) => Promise<void>;
     toggleMute: () => Promise<void>;
     toggleShare: () => Promise<void>;
     openSettings: () => void;
@@ -608,6 +613,8 @@ function WorkspaceShell(props: {
 
   const [selfMuted, setSelfMuted] = useState(false);
   const [selfDeafened, setSelfDeafened] = useState(false);
+  const [selfServerMuted, setSelfServerMuted] = useState(false);
+  const [selfServerDeafened, setSelfServerDeafened] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalDto[]>([]);
 
   const [currentAvatarUrl, setCurrentAvatarUrl] = useState<string | null>(props.currentUser.avatarUrl);
@@ -653,6 +660,7 @@ function WorkspaceShell(props: {
     return created;
   }, []);
   const workspaceId = workspaceData?.workspace.id ?? null;
+  const isCurrentUserAdmin = props.currentUser.role === "Admin";
 
   useEffect(() => {
     setCurrentAvatarUrl(props.currentUser.avatarUrl);
@@ -764,6 +772,8 @@ function WorkspaceShell(props: {
     const me = data.members.find((x) => x.userId === props.currentUser.id);
     setSelfMuted(me?.isMuted ?? false);
     setSelfDeafened(me?.isDeafened ?? false);
+    setSelfServerMuted(me?.isServerMuted ?? false);
+    setSelfServerDeafened(me?.isServerDeafened ?? false);
   };
 
   const loadApprovals = async () => {
@@ -889,6 +899,10 @@ function WorkspaceShell(props: {
     }
 
     void ensureVoiceSession(connectedVoiceChannelId).catch(() => undefined);
+  }, [connectedVoiceChannelId]);
+
+  useEffect(() => {
+    setLiveVoiceMessages([]);
   }, [connectedVoiceChannelId]);
 
   useEffect(() => {
@@ -1035,6 +1049,13 @@ function WorkspaceShell(props: {
           members: nextMembers,
         };
       });
+
+      if (event.userId === currentUserIdRef.current) {
+        setSelfMuted(event.isMuted);
+        setSelfDeafened(event.isDeafened);
+        setSelfServerMuted(event.isServerMuted);
+        setSelfServerDeafened(event.isServerDeafened);
+      }
 
       if (
         event.userId === currentUserIdRef.current &&
@@ -1239,7 +1260,10 @@ function WorkspaceShell(props: {
     setVoiceControlState({ muted: false, sharing: false, connected: false, connectionError: false });
     setSelfMuted(false);
     setSelfDeafened(false);
+    setSelfServerMuted(false);
+    setSelfServerDeafened(false);
     setSpeakingUserIds(new Set());
+    setLiveVoiceMessages([]);
     if (notice) {
       setInfoMessage(notice);
     }
@@ -1304,6 +1328,11 @@ function WorkspaceShell(props: {
         handleVoiceSessionReplaced();
         return;
       }
+      if (isVoiceServerModeratedError(reason)) {
+        setInfoMessage("Voice state is controlled by server moderation.");
+        await loadWorkspace();
+        return;
+      }
       throw reason;
     }
 
@@ -1314,46 +1343,45 @@ function WorkspaceShell(props: {
 
   const toggleSelfMute = async () => {
     const nextMuted = !selfMuted;
-    if (voiceControlActionsRef.current) {
-      await voiceControlActionsRef.current.toggleMute();
+    const blockedByServerModeration =
+      !isCurrentUserAdmin &&
+      !nextMuted &&
+      (selfServerMuted || selfServerDeafened);
+    if (blockedByServerModeration) {
+      setInfoMessage("Only an admin can remove server mute/deafen.");
+      return;
     }
+
     await applySelfState(nextMuted, selfDeafened);
   };
 
   const toggleSelfDeafen = async () => {
     const nextDeafened = !selfDeafened;
-
-    if (nextDeafened) {
-      if (
-        !selfMuted &&
-        voiceControlActionsRef.current &&
-        !voiceControlState.muted
-      ) {
-        await voiceControlActionsRef.current.toggleMute();
-        autoMutedByDeafenRef.current = true;
-        await applySelfState(true, true);
-        return;
-      }
-
-      autoMutedByDeafenRef.current = false;
-      await applySelfState(selfMuted, true);
+    const blockedByServerDeafen = !isCurrentUserAdmin && !nextDeafened && selfServerDeafened;
+    if (blockedByServerDeafen) {
+      setInfoMessage("Only an admin can remove server deafen.");
       return;
     }
 
-    if (
-      selfMuted &&
-      autoMutedByDeafenRef.current &&
-      voiceControlActionsRef.current &&
-      voiceControlState.muted
-    ) {
-      await voiceControlActionsRef.current.toggleMute();
-      autoMutedByDeafenRef.current = false;
-      await applySelfState(false, false);
+    if (nextDeafened) {
+      autoMutedByDeafenRef.current = !selfMuted;
+      await applySelfState(true, true);
+      return;
+    }
+
+    let nextMuted = selfMuted;
+    if (autoMutedByDeafenRef.current) {
+      nextMuted = false;
+    }
+
+    const blockedByServerMute = !isCurrentUserAdmin && !nextMuted && selfServerMuted;
+    if (blockedByServerMute) {
+      setInfoMessage("Only an admin can remove server mute.");
       return;
     }
 
     autoMutedByDeafenRef.current = false;
-    await applySelfState(selfMuted, false);
+    await applySelfState(nextMuted, false);
   };
 
   const sendLiveVoiceMessage = async (content: string) => {
@@ -1556,6 +1584,7 @@ function WorkspaceShell(props: {
     }
 
     voiceControlActionsRef.current = {
+      setMuted: controls.setMuted,
       toggleMute: controls.toggleMute,
       toggleShare: controls.toggleShare,
       openSettings: controls.openSettings,
@@ -1578,6 +1607,14 @@ function WorkspaceShell(props: {
       };
     });
   };
+
+  useEffect(() => {
+    if (!voiceSession || !voiceControlActionsRef.current) {
+      return;
+    }
+
+    void voiceControlActionsRef.current.setMuted(selfMuted).catch(() => undefined);
+  }, [selfMuted, voiceSession?.sessionInstanceId]);
 
   if (loading) {
     return (
@@ -1793,7 +1830,7 @@ function WorkspaceShell(props: {
                 <Stack spacing={1} alignItems="center">
                   <Typography variant="h6">Voice channel selected</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Double-click a voice channel to connect.
+                    Click a voice channel to connect.
                   </Typography>
                 </Stack>
               </Box>

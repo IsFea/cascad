@@ -65,6 +65,8 @@ export type WorkspaceMemberDto = {
   connectedVoiceChannelId: string | null;
   isMuted: boolean;
   isDeafened: boolean;
+  isServerMuted: boolean;
+  isServerDeafened: boolean;
 };
 
 export type WorkspaceBootstrapResponse = {
@@ -139,6 +141,8 @@ export type VoicePresenceChangedEvent = {
   currentVoiceChannelId: string | null;
   isMuted: boolean;
   isDeafened: boolean;
+  isServerMuted: boolean;
+  isServerDeafened: boolean;
   occurredAtUtc: string;
 };
 

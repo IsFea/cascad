@@ -20,6 +20,7 @@ namespace Cascad.Api.Controllers;
 public sealed class VoiceController : ControllerBase
 {
     private const string VoiceSessionReplacedCode = "VOICE_SESSION_REPLACED";
+    private const string VoiceServerModeratedCode = "VOICE_SERVER_MODERATED";
     private static readonly TimeSpan VoiceSessionTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan StreamLeaseTtl = TimeSpan.FromSeconds(30);
 
@@ -129,8 +130,13 @@ public sealed class VoiceController : ControllerBase
 
         await _db.SaveChangesAsync(cancellationToken);
 
+        var moderationState = await GetVoiceModerationStateAsync(channel.WorkspaceId, userId, cancellationToken);
         if (previousVoiceChannelId != channel.Id)
         {
+            var effectiveState = ResolveEffectiveVoiceState(
+                selfMuted: current?.IsMuted ?? false,
+                selfDeafened: current?.IsDeafened ?? false,
+                moderationState);
             await BroadcastVoicePresenceChangedAsync(
                 workspaceId: channel.WorkspaceId,
                 userId: user.Id,
@@ -138,8 +144,10 @@ public sealed class VoiceController : ControllerBase
                 avatarUrl: user.AvatarUrl,
                 previousVoiceChannelId: previousVoiceChannelId,
                 currentVoiceChannelId: channel.Id,
-                isMuted: current?.IsMuted ?? false,
-                isDeafened: current?.IsDeafened ?? false,
+                isMuted: effectiveState.IsMuted,
+                isDeafened: effectiveState.IsDeafened,
+                isServerMuted: effectiveState.IsServerMuted,
+                isServerDeafened: effectiveState.IsServerDeafened,
                 occurredAtUtc: now,
                 cancellationToken: cancellationToken);
         }
@@ -240,6 +248,11 @@ public sealed class VoiceController : ControllerBase
                         continue;
                     }
 
+                    var moderationState = await GetVoiceModerationStateAsync(workspaceId, userId, cancellationToken);
+                    var effectiveState = ResolveEffectiveVoiceState(
+                        selfMuted: false,
+                        selfDeafened: false,
+                        moderationState);
                     await BroadcastVoicePresenceChangedAsync(
                         workspaceId: workspaceId,
                         userId: userId,
@@ -247,8 +260,10 @@ public sealed class VoiceController : ControllerBase
                         avatarUrl: user.AvatarUrl,
                         previousVoiceChannelId: session.ChannelId,
                         currentVoiceChannelId: null,
-                        isMuted: session.IsMuted,
-                        isDeafened: session.IsDeafened,
+                        isMuted: effectiveState.IsMuted,
+                        isDeafened: effectiveState.IsDeafened,
+                        isServerMuted: effectiveState.IsServerMuted,
+                        isServerDeafened: effectiveState.IsServerDeafened,
                         occurredAtUtc: DateTime.UtcNow,
                         cancellationToken: cancellationToken);
                 }
@@ -287,10 +302,89 @@ public sealed class VoiceController : ControllerBase
             return VoiceSessionReplaced();
         }
 
+        var channel = await _db.Channels
+            .Where(x => x.Id == session.ChannelId)
+            .Select(x => new { x.WorkspaceId })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (channel is null)
+        {
+            return NotFound();
+        }
+
+        var moderationState = await GetVoiceModerationStateAsync(channel.WorkspaceId, userId, cancellationToken);
+        var isAdmin = User.GetPlatformRole() == PlatformRole.Admin;
+        if (!isAdmin && IsServerModerationRemovalRequested(moderationState, request.IsMuted, request.IsDeafened))
+        {
+            return VoiceServerModerated();
+        }
+
+        if (isAdmin && moderationState is not null)
+        {
+            var moderationChanged = false;
+            if (!request.IsMuted && moderationState.IsServerMuted)
+            {
+                moderationState.IsServerMuted = false;
+                moderationChanged = true;
+            }
+
+            if (!request.IsDeafened && moderationState.IsServerDeafened)
+            {
+                moderationState.IsServerDeafened = false;
+                moderationChanged = true;
+            }
+
+            if (moderationChanged)
+            {
+                moderationState.UpdatedAtUtc = DateTime.UtcNow;
+                if (!moderationState.IsServerMuted && !moderationState.IsServerDeafened)
+                {
+                    _db.VoiceModerationStates.Remove(moderationState);
+                }
+            }
+        }
+
         session.IsMuted = request.IsMuted;
         session.IsDeafened = request.IsDeafened;
         session.LastSeenAtUtc = DateTime.UtcNow;
         await _db.SaveChangesAsync(cancellationToken);
+
+        var user = await _db.Users
+            .Where(x => x.Id == userId)
+            .Select(x => new { x.Username, x.AvatarUrl })
+            .SingleOrDefaultAsync(cancellationToken);
+
+        if (user is not null)
+        {
+            var moderationAfter = moderationState;
+            if (moderationAfter is not null)
+            {
+                var moderationEntityState = _db.Entry(moderationAfter).State;
+                if (moderationEntityState is EntityState.Deleted or EntityState.Detached)
+                {
+                    moderationAfter = null;
+                }
+            }
+
+            var effectiveState = ResolveEffectiveVoiceState(
+                selfMuted: session.IsMuted,
+                selfDeafened: session.IsDeafened,
+                moderationAfter);
+
+            await BroadcastVoicePresenceChangedAsync(
+                workspaceId: channel.WorkspaceId,
+                userId: userId,
+                username: user.Username,
+                avatarUrl: user.AvatarUrl,
+                previousVoiceChannelId: session.ChannelId,
+                currentVoiceChannelId: session.ChannelId,
+                isMuted: effectiveState.IsMuted,
+                isDeafened: effectiveState.IsDeafened,
+                isServerMuted: effectiveState.IsServerMuted,
+                isServerDeafened: effectiveState.IsServerDeafened,
+                occurredAtUtc: DateTime.UtcNow,
+                cancellationToken: cancellationToken);
+        }
+
         return NoContent();
     }
 
@@ -352,17 +446,95 @@ public sealed class VoiceController : ControllerBase
             return Forbid();
         }
 
-        var session = await _db.VoiceSessions.SingleOrDefaultAsync(
-            x => x.ChannelId == request.ChannelId && x.UserId == request.TargetUserId,
+        var channel = await _db.Channels.SingleOrDefaultAsync(
+            x => x.Id == request.ChannelId && !x.IsDeleted,
             cancellationToken);
-        if (session is null)
+        if (channel is null || channel.Type != ChannelType.Voice)
         {
             return NotFound();
         }
 
-        session.IsMuted = request.IsMuted;
-        session.LastSeenAtUtc = DateTime.UtcNow;
+        var targetUser = await _db.Users
+            .Where(x => x.Id == request.TargetUserId)
+            .Select(x => new { x.Username, x.AvatarUrl })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (targetUser is null)
+        {
+            return NotFound();
+        }
+
+        var isWorkspaceMember = await _db.WorkspaceMembers.AnyAsync(
+            x => x.WorkspaceId == channel.WorkspaceId && x.UserId == request.TargetUserId,
+            cancellationToken);
+        if (!isWorkspaceMember)
+        {
+            return NotFound();
+        }
+
+        var now = DateTime.UtcNow;
+        var moderationState = await GetVoiceModerationStateAsync(channel.WorkspaceId, request.TargetUserId, cancellationToken);
+        if (moderationState is null)
+        {
+            if (request.IsMuted)
+            {
+                moderationState = new VoiceModerationState
+                {
+                    WorkspaceId = channel.WorkspaceId,
+                    UserId = request.TargetUserId,
+                    IsServerMuted = true,
+                    IsServerDeafened = false,
+                    UpdatedAtUtc = now,
+                };
+                _db.VoiceModerationStates.Add(moderationState);
+            }
+        }
+        else
+        {
+            moderationState.IsServerMuted = request.IsMuted;
+            moderationState.UpdatedAtUtc = now;
+            if (!moderationState.IsServerMuted && !moderationState.IsServerDeafened)
+            {
+                _db.VoiceModerationStates.Remove(moderationState);
+            }
+        }
+
+        var targetSession = await _db.VoiceSessions
+            .Where(x => x.UserId == request.TargetUserId && x.Channel.WorkspaceId == channel.WorkspaceId)
+            .OrderByDescending(x => x.LastSeenAtUtc)
+            .Select(x => new { x.ChannelId, x.IsMuted, x.IsDeafened })
+            .FirstOrDefaultAsync(cancellationToken);
+
         await _db.SaveChangesAsync(cancellationToken);
+
+        var moderationAfter = moderationState;
+        if (moderationAfter is not null)
+        {
+            var moderationEntityState = _db.Entry(moderationAfter).State;
+            if (moderationEntityState is EntityState.Deleted or EntityState.Detached)
+            {
+                moderationAfter = null;
+            }
+        }
+
+        var effectiveState = ResolveEffectiveVoiceState(
+            selfMuted: targetSession?.IsMuted ?? false,
+            selfDeafened: targetSession?.IsDeafened ?? false,
+            moderationAfter);
+
+        await BroadcastVoicePresenceChangedAsync(
+            workspaceId: channel.WorkspaceId,
+            userId: request.TargetUserId,
+            username: targetUser.Username,
+            avatarUrl: targetUser.AvatarUrl,
+            previousVoiceChannelId: targetSession?.ChannelId,
+            currentVoiceChannelId: targetSession?.ChannelId,
+            isMuted: effectiveState.IsMuted,
+            isDeafened: effectiveState.IsDeafened,
+            isServerMuted: effectiveState.IsServerMuted,
+            isServerDeafened: effectiveState.IsServerDeafened,
+            occurredAtUtc: now,
+            cancellationToken: cancellationToken);
+
         return NoContent();
     }
 
@@ -409,6 +581,14 @@ public sealed class VoiceController : ControllerBase
 
             if (channel is not null && user is not null)
             {
+                var moderationState = await GetVoiceModerationStateAsync(
+                    workspaceId: channel.WorkspaceId,
+                    userId: request.TargetUserId,
+                    cancellationToken);
+                var effectiveState = ResolveEffectiveVoiceState(
+                    selfMuted: false,
+                    selfDeafened: false,
+                    moderationState);
                 await BroadcastVoicePresenceChangedAsync(
                     workspaceId: channel.WorkspaceId,
                     userId: request.TargetUserId,
@@ -416,8 +596,10 @@ public sealed class VoiceController : ControllerBase
                     avatarUrl: user.AvatarUrl,
                     previousVoiceChannelId: request.ChannelId,
                     currentVoiceChannelId: null,
-                    isMuted: session.IsMuted,
-                    isDeafened: session.IsDeafened,
+                    isMuted: effectiveState.IsMuted,
+                    isDeafened: effectiveState.IsDeafened,
+                    isServerMuted: effectiveState.IsServerMuted,
+                    isServerDeafened: effectiveState.IsServerDeafened,
                     occurredAtUtc: DateTime.UtcNow,
                     cancellationToken: cancellationToken);
             }
@@ -439,17 +621,95 @@ public sealed class VoiceController : ControllerBase
             return Forbid();
         }
 
-        var session = await _db.VoiceSessions.SingleOrDefaultAsync(
-            x => x.ChannelId == request.ChannelId && x.UserId == request.TargetUserId,
+        var channel = await _db.Channels.SingleOrDefaultAsync(
+            x => x.Id == request.ChannelId && !x.IsDeleted,
             cancellationToken);
-        if (session is null)
+        if (channel is null || channel.Type != ChannelType.Voice)
         {
             return NotFound();
         }
 
-        session.IsDeafened = request.IsDeafened;
-        session.LastSeenAtUtc = DateTime.UtcNow;
+        var targetUser = await _db.Users
+            .Where(x => x.Id == request.TargetUserId)
+            .Select(x => new { x.Username, x.AvatarUrl })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (targetUser is null)
+        {
+            return NotFound();
+        }
+
+        var isWorkspaceMember = await _db.WorkspaceMembers.AnyAsync(
+            x => x.WorkspaceId == channel.WorkspaceId && x.UserId == request.TargetUserId,
+            cancellationToken);
+        if (!isWorkspaceMember)
+        {
+            return NotFound();
+        }
+
+        var now = DateTime.UtcNow;
+        var moderationState = await GetVoiceModerationStateAsync(channel.WorkspaceId, request.TargetUserId, cancellationToken);
+        if (moderationState is null)
+        {
+            if (request.IsDeafened)
+            {
+                moderationState = new VoiceModerationState
+                {
+                    WorkspaceId = channel.WorkspaceId,
+                    UserId = request.TargetUserId,
+                    IsServerMuted = false,
+                    IsServerDeafened = true,
+                    UpdatedAtUtc = now,
+                };
+                _db.VoiceModerationStates.Add(moderationState);
+            }
+        }
+        else
+        {
+            moderationState.IsServerDeafened = request.IsDeafened;
+            moderationState.UpdatedAtUtc = now;
+            if (!moderationState.IsServerMuted && !moderationState.IsServerDeafened)
+            {
+                _db.VoiceModerationStates.Remove(moderationState);
+            }
+        }
+
+        var targetSession = await _db.VoiceSessions
+            .Where(x => x.UserId == request.TargetUserId && x.Channel.WorkspaceId == channel.WorkspaceId)
+            .OrderByDescending(x => x.LastSeenAtUtc)
+            .Select(x => new { x.ChannelId, x.IsMuted, x.IsDeafened })
+            .FirstOrDefaultAsync(cancellationToken);
+
         await _db.SaveChangesAsync(cancellationToken);
+
+        var moderationAfter = moderationState;
+        if (moderationAfter is not null)
+        {
+            var moderationEntityState = _db.Entry(moderationAfter).State;
+            if (moderationEntityState is EntityState.Deleted or EntityState.Detached)
+            {
+                moderationAfter = null;
+            }
+        }
+
+        var effectiveState = ResolveEffectiveVoiceState(
+            selfMuted: targetSession?.IsMuted ?? false,
+            selfDeafened: targetSession?.IsDeafened ?? false,
+            moderationAfter);
+
+        await BroadcastVoicePresenceChangedAsync(
+            workspaceId: channel.WorkspaceId,
+            userId: request.TargetUserId,
+            username: targetUser.Username,
+            avatarUrl: targetUser.AvatarUrl,
+            previousVoiceChannelId: targetSession?.ChannelId,
+            currentVoiceChannelId: targetSession?.ChannelId,
+            isMuted: effectiveState.IsMuted,
+            isDeafened: effectiveState.IsDeafened,
+            isServerMuted: effectiveState.IsServerMuted,
+            isServerDeafened: effectiveState.IsServerDeafened,
+            occurredAtUtc: now,
+            cancellationToken: cancellationToken);
+
         return NoContent();
     }
 
@@ -626,6 +886,66 @@ public sealed class VoiceController : ControllerBase
         return StatusCode(StatusCodes.Status409Conflict, details);
     }
 
+    private ObjectResult VoiceServerModerated()
+    {
+        var details = new ProblemDetails
+        {
+            Title = "Voice state is controlled by server moderation.",
+            Status = StatusCodes.Status403Forbidden
+        };
+        details.Extensions["code"] = VoiceServerModeratedCode;
+        return StatusCode(StatusCodes.Status403Forbidden, details);
+    }
+
+    private Task<VoiceModerationState?> GetVoiceModerationStateAsync(
+        Guid workspaceId,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        return _db.VoiceModerationStates.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.UserId == userId,
+            cancellationToken);
+    }
+
+    private static bool IsServerModerationRemovalRequested(
+        VoiceModerationState? moderationState,
+        bool requestedMuted,
+        bool requestedDeafened)
+    {
+        if (moderationState is null)
+        {
+            return false;
+        }
+
+        if (moderationState.IsServerDeafened && !requestedDeafened)
+        {
+            return true;
+        }
+
+        if (moderationState.IsServerMuted && !requestedMuted)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static EffectiveVoiceState ResolveEffectiveVoiceState(
+        bool selfMuted,
+        bool selfDeafened,
+        VoiceModerationState? moderationState)
+    {
+        var serverMuted = moderationState?.IsServerMuted ?? false;
+        var serverDeafened = moderationState?.IsServerDeafened ?? false;
+        var effectiveDeafened = selfDeafened || serverDeafened;
+        var effectiveMuted = selfMuted || serverMuted || serverDeafened;
+        return new EffectiveVoiceState(
+            effectiveMuted,
+            effectiveDeafened,
+            serverMuted,
+            serverDeafened);
+    }
+
     private async Task CleanupStaleVoiceStateAsync(CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
@@ -659,6 +979,14 @@ public sealed class VoiceController : ControllerBase
 
         foreach (var staleSession in staleSessions)
         {
+            var moderationState = await GetVoiceModerationStateAsync(
+                workspaceId: staleSession.Channel.WorkspaceId,
+                userId: staleSession.UserId,
+                cancellationToken);
+            var effectiveState = ResolveEffectiveVoiceState(
+                selfMuted: false,
+                selfDeafened: false,
+                moderationState);
             await BroadcastVoicePresenceChangedAsync(
                 workspaceId: staleSession.Channel.WorkspaceId,
                 userId: staleSession.UserId,
@@ -666,8 +994,10 @@ public sealed class VoiceController : ControllerBase
                 avatarUrl: staleSession.User.AvatarUrl,
                 previousVoiceChannelId: staleSession.ChannelId,
                 currentVoiceChannelId: null,
-                isMuted: staleSession.IsMuted,
-                isDeafened: staleSession.IsDeafened,
+                isMuted: effectiveState.IsMuted,
+                isDeafened: effectiveState.IsDeafened,
+                isServerMuted: effectiveState.IsServerMuted,
+                isServerDeafened: effectiveState.IsServerDeafened,
                 occurredAtUtc: now,
                 cancellationToken: cancellationToken);
         }
@@ -682,6 +1012,8 @@ public sealed class VoiceController : ControllerBase
         Guid? currentVoiceChannelId,
         bool isMuted,
         bool isDeafened,
+        bool isServerMuted,
+        bool isServerDeafened,
         DateTime occurredAtUtc,
         CancellationToken cancellationToken)
     {
@@ -697,7 +1029,15 @@ public sealed class VoiceController : ControllerBase
                     currentVoiceChannelId,
                     isMuted,
                     isDeafened,
+                    isServerMuted,
+                    isServerDeafened,
                     occurredAtUtc),
                 cancellationToken);
     }
+
+    private sealed record EffectiveVoiceState(
+        bool IsMuted,
+        bool IsDeafened,
+        bool IsServerMuted,
+        bool IsServerDeafened);
 }

@@ -90,6 +90,10 @@ public sealed class WorkspaceController : ControllerBase
             .Where(x => x.Channel.WorkspaceId == workspace.Id)
             .ToListAsync(cancellationToken);
 
+        var moderationByUser = await _db.VoiceModerationStates
+            .Where(x => x.WorkspaceId == workspace.Id)
+            .ToDictionaryAsync(x => x.UserId, cancellationToken);
+
         var voiceByUser = voiceSessions
             .GroupBy(x => x.UserId)
             .ToDictionary(
@@ -105,14 +109,23 @@ public sealed class WorkspaceController : ControllerBase
                 .Select(member =>
                 {
                     voiceByUser.TryGetValue(member.UserId, out var voiceState);
+                    moderationByUser.TryGetValue(member.UserId, out var moderationState);
+                    var selfMuted = voiceState?.IsMuted ?? false;
+                    var selfDeafened = voiceState?.IsDeafened ?? false;
+                    var serverMuted = moderationState?.IsServerMuted ?? false;
+                    var serverDeafened = moderationState?.IsServerDeafened ?? false;
+                    var effectiveDeafened = selfDeafened || serverDeafened;
+                    var effectiveMuted = selfMuted || serverMuted || serverDeafened;
                     return new WorkspaceMemberDto(
                         member.UserId,
                         member.User.Username,
                         member.Role,
                         member.User.AvatarUrl,
                         voiceState?.ChannelId,
-                        voiceState?.IsMuted ?? false,
-                        voiceState?.IsDeafened ?? false);
+                        effectiveMuted,
+                        effectiveDeafened,
+                        serverMuted,
+                        serverDeafened);
                 })
                 .OrderByDescending(x => x.Role)
                 .ThenBy(x => x.Username)

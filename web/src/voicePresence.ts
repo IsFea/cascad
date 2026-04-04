@@ -18,7 +18,9 @@ export function patchWorkspaceMembersVoiceState(
   if (
     current.connectedVoiceChannelId === event.currentVoiceChannelId &&
     current.isMuted === event.isMuted &&
-    current.isDeafened === event.isDeafened
+    current.isDeafened === event.isDeafened &&
+    current.isServerMuted === event.isServerMuted &&
+    current.isServerDeafened === event.isServerDeafened
   ) {
     return members;
   }
@@ -29,6 +31,8 @@ export function patchWorkspaceMembersVoiceState(
     connectedVoiceChannelId: event.currentVoiceChannelId,
     isMuted: event.isMuted,
     isDeafened: event.isDeafened,
+    isServerMuted: event.isServerMuted,
+    isServerDeafened: event.isServerDeafened,
   };
   return updated;
 }
@@ -116,6 +120,8 @@ export function normalizeVoicePresenceChangedEvent(raw: unknown): VoicePresenceC
   const username = readStringField(input, "username", "Username");
   const isMuted = readBooleanField(input, "isMuted", "IsMuted");
   const isDeafened = readBooleanField(input, "isDeafened", "IsDeafened");
+  const isServerMuted = readBooleanField(input, "isServerMuted", "IsServerMuted");
+  const isServerDeafened = readBooleanField(input, "isServerDeafened", "IsServerDeafened");
 
   if (!workspaceId || !userId || !username || isMuted === null || isDeafened === null) {
     return null;
@@ -130,6 +136,8 @@ export function normalizeVoicePresenceChangedEvent(raw: unknown): VoicePresenceC
     currentVoiceChannelId: readStringField(input, "currentVoiceChannelId", "CurrentVoiceChannelId"),
     isMuted,
     isDeafened,
+    isServerMuted: isServerMuted ?? false,
+    isServerDeafened: isServerDeafened ?? false,
     occurredAtUtc:
       readStringField(input, "occurredAtUtc", "OccurredAtUtc") ?? new Date().toISOString(),
   };

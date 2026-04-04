@@ -9,4 +9,6 @@ public sealed record VoicePresenceChangedEvent(
     Guid? CurrentVoiceChannelId,
     bool IsMuted,
     bool IsDeafened,
+    bool IsServerMuted,
+    bool IsServerDeafened,
     DateTime OccurredAtUtc);

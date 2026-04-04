@@ -249,6 +249,215 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.NoContent, second.Result.StatusCode);
     }
 
+    [Fact]
+    public async Task ServerModeration_ShouldPersistAcrossReconnect_AndBlockSelfClear_ForRegularUser()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await RegisterAndApproveAsync(adminClient, "moderateduser");
+
+        var userClient = _factory.CreateClient();
+        var userToken = await LoginAsync(userClient, "moderateduser", "moderateduser12345");
+        userClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
+        var userWorkspace = await userClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(userWorkspace);
+        var userId = userWorkspace!.CurrentUser.Id;
+        var voiceChannelId = userWorkspace.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+
+        var connectResponse = await userClient.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest { ChannelId = voiceChannelId });
+        connectResponse.EnsureSuccessStatusCode();
+        var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+        Assert.NotNull(connectPayload);
+
+        var deafenResponse = await adminClient.PostAsJsonAsync(
+            "/api/voice/moderation/deafen",
+            new VoiceDeafenRequest
+            {
+                ChannelId = voiceChannelId,
+                TargetUserId = userId,
+                IsDeafened = true
+            });
+        deafenResponse.EnsureSuccessStatusCode();
+
+        var moderatedWorkspace = await userClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(moderatedWorkspace);
+        var moderatedMember = moderatedWorkspace!.Members.Single(x => x.UserId == userId);
+        Assert.True(moderatedMember.IsDeafened);
+        Assert.True(moderatedMember.IsMuted);
+        Assert.True(moderatedMember.IsServerDeafened);
+        Assert.False(moderatedMember.IsServerMuted);
+
+        var forbiddenResponse = await userClient.PostAsJsonAsync(
+            "/api/voice/self-state",
+            new VoiceSelfStateRequest
+            {
+                ChannelId = voiceChannelId,
+                SessionInstanceId = connectPayload!.SessionInstanceId,
+                IsMuted = false,
+                IsDeafened = false
+            });
+        Assert.Equal(HttpStatusCode.Forbidden, forbiddenResponse.StatusCode);
+        var forbiddenBody = await forbiddenResponse.Content.ReadAsStringAsync();
+        Assert.Contains("VOICE_SERVER_MODERATED", forbiddenBody, StringComparison.OrdinalIgnoreCase);
+
+        var disconnectResponse = await userClient.PostAsJsonAsync(
+            "/api/voice/disconnect",
+            new VoiceDisconnectRequest
+            {
+                ChannelId = voiceChannelId,
+                SessionInstanceId = connectPayload.SessionInstanceId
+            });
+        disconnectResponse.EnsureSuccessStatusCode();
+
+        var reconnectResponse = await userClient.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest { ChannelId = voiceChannelId });
+        reconnectResponse.EnsureSuccessStatusCode();
+
+        var reloadedWorkspace = await userClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(reloadedWorkspace);
+        var reloadedMember = reloadedWorkspace!.Members.Single(x => x.UserId == userId);
+        Assert.True(reloadedMember.IsServerDeafened);
+        Assert.True(reloadedMember.IsDeafened);
+        Assert.True(reloadedMember.IsMuted);
+    }
+
+    [Fact]
+    public async Task AdminSelfState_ShouldAllowClearingOwnServerModeration()
+    {
+        var client = _factory.CreateClient();
+        var adminToken = await LoginAsync(client, "admin", "admin12345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        var workspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(workspace);
+        var adminId = workspace!.CurrentUser.Id;
+        var voiceChannelId = workspace.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+
+        var connectResponse = await client.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest { ChannelId = voiceChannelId });
+        connectResponse.EnsureSuccessStatusCode();
+        var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+        Assert.NotNull(connectPayload);
+
+        var muteResponse = await client.PostAsJsonAsync(
+            "/api/voice/moderation/mute",
+            new VoiceModerationRequest
+            {
+                ChannelId = voiceChannelId,
+                TargetUserId = adminId,
+                IsMuted = true
+            });
+        muteResponse.EnsureSuccessStatusCode();
+
+        var mutedWorkspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(mutedWorkspace);
+        var mutedMember = mutedWorkspace!.Members.Single(x => x.UserId == adminId);
+        Assert.True(mutedMember.IsServerMuted);
+        Assert.True(mutedMember.IsMuted);
+
+        var selfStateResponse = await client.PostAsJsonAsync(
+            "/api/voice/self-state",
+            new VoiceSelfStateRequest
+            {
+                ChannelId = voiceChannelId,
+                SessionInstanceId = connectPayload!.SessionInstanceId,
+                IsMuted = false,
+                IsDeafened = false
+            });
+        selfStateResponse.EnsureSuccessStatusCode();
+
+        var reloadedWorkspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(reloadedWorkspace);
+        var reloadedMember = reloadedWorkspace!.Members.Single(x => x.UserId == adminId);
+        Assert.False(reloadedMember.IsServerMuted);
+        Assert.False(reloadedMember.IsServerDeafened);
+        Assert.False(reloadedMember.IsMuted);
+        Assert.False(reloadedMember.IsDeafened);
+    }
+
+    [Fact]
+    public async Task VoicePresenceChanged_ShouldBeDelivered_OnModerationWithoutChannelTransition()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await RegisterAndApproveAsync(adminClient, "moderatedalice");
+        await RegisterAndApproveAsync(adminClient, "moderatedbob");
+
+        var aliceClient = _factory.CreateClient();
+        var aliceToken = await LoginAsync(aliceClient, "moderatedalice", "moderatedalice12345");
+        aliceClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", aliceToken);
+        var aliceWorkspace = await aliceClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(aliceWorkspace);
+        var workspaceId = aliceWorkspace!.Workspace.Id;
+        var voiceChannelId = aliceWorkspace.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+        var aliceUserId = aliceWorkspace.CurrentUser.Id;
+
+        var connectResponse = await aliceClient.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest { ChannelId = voiceChannelId });
+        connectResponse.EnsureSuccessStatusCode();
+
+        var bobClient = _factory.CreateClient();
+        var bobToken = await LoginAsync(bobClient, "moderatedbob", "moderatedbob12345");
+        bobClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bobToken);
+        var bobWorkspace = await bobClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(bobWorkspace);
+        var eventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var hubConnection = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(bobToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+
+        hubConnection.On<VoicePresenceChangedEventDto>(
+            "voicePresenceChanged",
+            payload => eventChannel.Writer.TryWrite(payload));
+
+        await hubConnection.StartAsync();
+        try
+        {
+            await hubConnection.InvokeAsync("JoinWorkspace", workspaceId);
+
+            var muteResponse = await adminClient.PostAsJsonAsync(
+                "/api/voice/moderation/mute",
+                new VoiceModerationRequest
+                {
+                    ChannelId = voiceChannelId,
+                    TargetUserId = aliceUserId,
+                    IsMuted = true
+                });
+            muteResponse.EnsureSuccessStatusCode();
+
+            var moderationEvent = await WaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x =>
+                    x.UserId == aliceUserId &&
+                    x.PreviousVoiceChannelId == voiceChannelId &&
+                    x.CurrentVoiceChannelId == voiceChannelId &&
+                    x.IsServerMuted);
+
+            Assert.Equal(workspaceId, moderationEvent.WorkspaceId);
+            Assert.True(moderationEvent.IsMuted);
+            Assert.True(moderationEvent.IsServerMuted);
+        }
+        finally
+        {
+            await hubConnection.StopAsync();
+            await hubConnection.DisposeAsync();
+        }
+    }
+
     private static async Task<string> LoginAsync(HttpClient client, string username, string password)
     {
         var response = await client.PostAsJsonAsync(
@@ -305,5 +514,7 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
         Guid? CurrentVoiceChannelId,
         bool IsMuted,
         bool IsDeafened,
+        bool IsServerMuted,
+        bool IsServerDeafened,
         DateTime OccurredAtUtc);
 }

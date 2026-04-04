@@ -47,6 +47,9 @@ public sealed class AppUser
 
     public ICollection<VoiceSession> VoiceSessions { get; set; } = new List<VoiceSession>();
 
+    public ICollection<VoiceModerationState> VoiceModerationStates { get; set; } =
+        new List<VoiceModerationState>();
+
     public ICollection<VoiceStreamPublication> StreamPublications { get; set; } =
         new List<VoiceStreamPublication>();
 

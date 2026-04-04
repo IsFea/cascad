@@ -26,6 +26,8 @@ public sealed class AppDbContext : DbContext
 
     public DbSet<VoiceSession> VoiceSessions => Set<VoiceSession>();
 
+    public DbSet<VoiceModerationState> VoiceModerationStates => Set<VoiceModerationState>();
+
     public DbSet<VoiceStreamPublication> VoiceStreamPublications => Set<VoiceStreamPublication>();
 
     public DbSet<ChannelMessage> ChannelMessages => Set<ChannelMessage>();
@@ -146,6 +148,22 @@ public sealed class AppDbContext : DbContext
 
             entity.HasOne(x => x.User)
                 .WithMany(x => x.VoiceSessions)
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<VoiceModerationState>(entity =>
+        {
+            entity.HasKey(x => new { x.WorkspaceId, x.UserId });
+            entity.HasIndex(x => x.UserId);
+
+            entity.HasOne(x => x.Workspace)
+                .WithMany(x => x.VoiceModerationStates)
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(x => x.User)
+                .WithMany(x => x.VoiceModerationStates)
                 .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });

@@ -55,6 +55,7 @@ export type EmbeddedVoiceControls = {
   sharing: boolean;
   connected: boolean;
   connectionError: boolean;
+  setMuted: (muted: boolean) => Promise<void>;
   toggleMute: () => Promise<void>;
   toggleShare: () => Promise<void>;
   openSettings: () => void;
@@ -284,6 +285,7 @@ export function EmbeddedVoiceStage(props: {
       sharing: media.sharing,
       connected: media.connected,
       connectionError: Boolean(media.error),
+      setMuted: media.setLocalMute,
       toggleMute: media.toggleLocalMute,
       toggleShare: async () => {
         if (media.sharing) {
@@ -305,6 +307,7 @@ export function EmbeddedVoiceStage(props: {
     media.error,
     media.muted,
     media.sharing,
+    media.setLocalMute,
     media.toggleLocalMute,
     props.onControlsChange,
   ]);
@@ -708,8 +711,8 @@ export function EmbeddedVoiceStage(props: {
           selectedAudioMenuParticipant !== null &&
           canModerateSelectedParticipant(selectedAudioMenuParticipant.identity)
         }
-        serverMuted={selectedParticipantUserState?.isMuted ?? false}
-        serverDeafened={selectedParticipantUserState?.isDeafened ?? false}
+        serverMuted={selectedParticipantUserState?.isServerMuted ?? false}
+        serverDeafened={selectedParticipantUserState?.isServerDeafened ?? false}
         participantRole={selectedParticipantUserState?.role ?? null}
         onKick={(identity) => void props.onKick(menuChannelId, identity)}
         onSetServerMuted={(identity, muted) =>
@@ -753,8 +756,8 @@ export function EmbeddedVoiceStage(props: {
           selectedContextParticipant !== null &&
           canModerateSelectedParticipant(selectedContextParticipant.identity)
         }
-        serverMuted={selectedContextUserState?.isMuted ?? false}
-        serverDeafened={selectedContextUserState?.isDeafened ?? false}
+        serverMuted={selectedContextUserState?.isServerMuted ?? false}
+        serverDeafened={selectedContextUserState?.isServerDeafened ?? false}
         participantRole={selectedContextUserState?.role ?? null}
         onKick={(identity) => void props.onKick(props.session.room.id, identity)}
         onSetServerMuted={(identity, muted) =>

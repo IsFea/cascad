@@ -179,10 +179,24 @@ describe("roomState:screenShareConfig", () => {
 });
 
 describe("roomState:resolvePlaybackLevels", () => {
-  it("uses gain path for >100% when supported", () => {
-    const boosted = resolvePlaybackLevels(1.75, true);
+  it("keeps 100% at unity gain on boost path", () => {
+    const boosted = resolvePlaybackLevels(1, true);
     expect(boosted.elementVolume).toBe(1);
-    expect(boosted.gainValue).toBe(1.75);
+    expect(boosted.gainValue).toBe(1);
+    expect(boosted.boosted).toBe(false);
+  });
+
+  it("applies nonlinear boost at 150% when supported", () => {
+    const boosted = resolvePlaybackLevels(1.5, true);
+    expect(boosted.elementVolume).toBe(1);
+    expect(boosted.gainValue).toBe(1.7);
+    expect(boosted.boosted).toBe(true);
+  });
+
+  it("caps nonlinear boost to x3 at 200% when supported", () => {
+    const boosted = resolvePlaybackLevels(2, true);
+    expect(boosted.elementVolume).toBe(1);
+    expect(boosted.gainValue).toBe(3);
     expect(boosted.boosted).toBe(true);
   });
 

@@ -26,6 +26,8 @@ describe("roomState:getAudioChannelForSource", () => {
   it("maps screen share audio to stream channel", () => {
     expect(getAudioChannelForSource(Track.Source.ScreenShareAudio)).toBe("stream");
     expect(getAudioChannelForSource("screen_share_audio")).toBe("stream");
+    expect(getAudioChannelForSource(undefined, Track.Source.ScreenShareAudio)).toBe("stream");
+    expect(getAudioChannelForSource(undefined, "screen_share")).toBe("stream");
   });
 
   it("maps microphone and unknown sources to voice channel", () => {
@@ -143,9 +145,24 @@ describe("roomState:screenShareConfig", () => {
 
     expect(config.captureOptions.resolution?.width).toBe(1920);
     expect(config.captureOptions.contentHint).toBe("motion");
+    expect(config.captureOptions.video).toBe(true);
     expect(config.captureOptions.audio).toBe(true);
     expect(config.publishOptions.videoEncoding?.maxFramerate).toBe(30);
+    expect(config.publishOptions.degradationPreference).toBe("maintain-framerate");
     expect(config.fallback).toBeUndefined();
+  });
+
+  it("applies text clarity profile", () => {
+    const config = buildScreenShareConfig({
+      resolution: "720p",
+      fps: 30,
+      mode: "text",
+      includeSystemAudio: false,
+    });
+
+    expect(config.captureOptions.contentHint).toBe("detail");
+    expect(config.publishOptions.simulcast).toBe(false);
+    expect(config.publishOptions.degradationPreference).toBe("maintain-resolution");
   });
 
   it("creates fallback for 60fps", () => {

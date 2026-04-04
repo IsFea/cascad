@@ -195,6 +195,9 @@ export function ChannelSidebar(props: {
                             },
                           }}
                           onContextMenu={(event) => {
+                            if (participant.userId === props.currentUser.id) {
+                              return;
+                            }
                             event.preventDefault();
                             event.stopPropagation();
                             props.onParticipantContextMenu(event, {

@@ -70,6 +70,7 @@ export type ParticipantMenuRequest = {
 export function EmbeddedVoiceStage(props: {
   session: JoinRoomResponse;
   appToken: string;
+  selfDeafened: boolean;
   voiceMessages: Array<{ userId: string; username: string; content: string; createdAtUtc: string }>;
   onSendVoiceMessage: (content: string) => Promise<void>;
   onSpeakingUsersChange: (userIds: Set<string>) => void;
@@ -305,6 +306,10 @@ export function EmbeddedVoiceStage(props: {
     );
     props.onSpeakingUsersChange(speakingUsers);
   }, [media.participants, props.onSpeakingUsersChange]);
+
+  useEffect(() => {
+    media.setPlaybackSuppressed(props.selfDeafened);
+  }, [props.selfDeafened]);
 
   useEffect(() => {
     return () => {
@@ -595,6 +600,7 @@ export function EmbeddedVoiceStage(props: {
                   void media.changeOutputDevice(event.target.value);
                 }}
               >
+                <MenuItem value="">System default</MenuItem>
                 {media.outputDevices.map((device) => (
                   <MenuItem key={device.deviceId} value={device.deviceId}>
                     {device.label || "Speakers"}

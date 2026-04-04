@@ -29,6 +29,9 @@ export function ParticipantAudioMenu(props: {
   onSetServerDeafened: (identity: string, deafened: boolean) => void;
   onSetRole: (identity: string, role: PlatformRole) => void;
 }) {
+  const showLocalAudioControlsForTarget =
+    props.showLocalAudioControls && Boolean(props.participant && !props.participant.isLocal);
+
   return (
     <Menu
       open={Boolean(props.menu)}
@@ -50,13 +53,15 @@ export function ParticipantAudioMenu(props: {
           <Typography variant="caption" color="text.secondary">
             Local audio controls
           </Typography>
-          {!props.showLocalAudioControls && (
+          {!showLocalAudioControlsForTarget && (
             <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.7 }}>
-              Join this voice channel to tune local voice/stream volume.
+              {props.participant.isLocal
+                ? "Self-monitoring controls are hidden for your own participant."
+                : "Join this voice channel to tune local voice/stream volume."}
             </Typography>
           )}
 
-          {props.showLocalAudioControls && (
+          {showLocalAudioControlsForTarget && (
             <>
               <MenuItem
                 onClick={() =>

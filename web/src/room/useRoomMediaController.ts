@@ -5,6 +5,7 @@ import {
   LocalAudioTrack,
   RemoteAudioTrack,
   RemoteParticipant,
+  RemoteTrackPublication,
   Room,
   RoomEvent,
   supportsAudioOutputSelection,
@@ -67,6 +68,7 @@ type UseRoomMediaControllerResult = {
   remoteParticipantsCount: number;
   setLayoutMode: (mode: StreamLayoutMode) => void;
   setFocusedStream: (sid: string | null) => void;
+  setPlaybackSuppressed: (value: boolean) => void;
   toggleLocalMute: () => Promise<void>;
   startScreenShare: () => Promise<boolean>;
   stopScreenShare: () => Promise<void>;
@@ -88,6 +90,7 @@ export function useRoomMediaController(
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [playbackSuppressed, setPlaybackSuppressedState] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [participants, setParticipants] = useState<ParticipantState[]>([]);
@@ -121,6 +124,7 @@ export function useRoomMediaController(
   const selectedInputRef = useRef("");
   const selectedOutputRef = useRef("");
   const mutedRef = useRef(false);
+  const playbackSuppressedRef = useRef(false);
   const dspSettingsRef = useRef<DspSettings>(DEFAULT_DSP_SETTINGS);
 
   const voiceVolumeMapRef = useRef<Record<string, number>>({});
@@ -139,6 +143,10 @@ export function useRoomMediaController(
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
+
+  useEffect(() => {
+    playbackSuppressedRef.current = playbackSuppressed;
+  }, [playbackSuppressed]);
 
   useEffect(() => {
     dspSettingsRef.current = dspSettings;
@@ -300,6 +308,7 @@ export function useRoomMediaController(
   const applyBindingAudioSettings = (binding: AudioBinding) => {
     const requestedVolume = getChannelVolume(binding.identity, binding.source);
     const isMuted = getChannelMute(binding.identity, binding.source);
+    const isOutputSuppressed = playbackSuppressedRef.current;
 
     const shouldTryBoost = requestedVolume > 1 && !selectedOutputRef.current;
     if (shouldTryBoost) {
@@ -314,10 +323,10 @@ export function useRoomMediaController(
 
     if (binding.boostSupported && binding.boostGainNode) {
       binding.element.muted = true;
-      binding.boostGainNode.gain.value = isMuted ? 0 : levels.gainValue;
+      binding.boostGainNode.gain.value = isMuted || isOutputSuppressed ? 0 : levels.gainValue;
     } else {
       binding.element.muted = false;
-      binding.element.volume = isMuted ? 0 : levels.elementVolume;
+      binding.element.volume = isMuted || isOutputSuppressed ? 0 : levels.elementVolume;
       void applyOutputDevice(binding);
     }
   };
@@ -555,8 +564,11 @@ export function useRoomMediaController(
         const outputs = await Room.getLocalDevices("audiooutput", false);
         setOutputDevices(outputs);
         setSelectedOutputId((previous) => {
-          const fallback = outputs[0]?.deviceId ?? "";
-          const next = previous || selectedOutputRef.current || fallback;
+          const keepCurrent = previous || selectedOutputRef.current;
+          const next =
+            keepCurrent && outputs.some((device) => device.deviceId === keepCurrent)
+              ? keepCurrent
+              : "";
           selectedOutputRef.current = next;
           return next;
         });
@@ -627,11 +639,11 @@ export function useRoomMediaController(
 
     const onTrackSubscribed = (
       track: Track,
-      _publication: unknown,
+      publication: RemoteTrackPublication,
       participant: RemoteParticipant,
     ) => {
       if (track.kind === Track.Kind.Audio) {
-        const source = getAudioChannelForSource(track.source);
+        const source = getAudioChannelForSource(track.source, publication.source);
         const sid = track.sid ?? `${participant.identity}-${source}-${Date.now()}`;
 
         if (!audioBindingsRef.current.has(sid)) {
@@ -918,6 +930,14 @@ export function useRoomMediaController(
     dispatchLayout({ type: "set-focus", sid });
   };
 
+  const setPlaybackSuppressed = (value: boolean) => {
+    playbackSuppressedRef.current = value;
+    setPlaybackSuppressedState((current) => (current === value ? current : value));
+    for (const binding of audioBindingsRef.current.values()) {
+      applyBindingAudioSettings(binding);
+    }
+  };
+
   const startScreenShare = async () => {
     if (!roomRef.current) {
       return false;
@@ -1097,6 +1117,7 @@ export function useRoomMediaController(
     remoteParticipantsCount: participants.filter((participant) => !participant.isLocal).length,
     setLayoutMode,
     setFocusedStream,
+    setPlaybackSuppressed,
     toggleLocalMute,
     startScreenShare,
     stopScreenShare,

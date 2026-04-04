@@ -222,9 +222,18 @@ export function resolveFocusedStreamSid(
 
 export function getAudioChannelForSource(
   source: Track.Source | string | undefined,
+  fallbackSource?: Track.Source | string | undefined,
 ): AudioChannel {
-  if (source === Track.Source.ScreenShareAudio || source === "screen_share_audio") {
-    return "stream";
+  const candidates = [source, fallbackSource];
+  for (const candidate of candidates) {
+    if (
+      candidate === Track.Source.ScreenShareAudio ||
+      candidate === "screen_share_audio" ||
+      candidate === Track.Source.ScreenShare ||
+      candidate === "screen_share"
+    ) {
+      return "stream";
+    }
   }
 
   return "voice";
@@ -512,10 +521,13 @@ export function buildScreenShareConfig(
   const fps = options.fps;
   const resolution = resolutionByPreset(options.resolution);
   const maxBitrate = bitrateByPreset(options.resolution, fps);
-  const contentHint = options.mode === "text" ? "text" : "motion";
+  const contentHint = options.mode === "text" ? "detail" : "motion";
   const systemAudio = options.includeSystemAudio ? "include" : "exclude";
+  const degradationPreference: RTCDegradationPreference =
+    options.mode === "text" ? "maintain-resolution" : "maintain-framerate";
 
   const baseCaptureOptions: ScreenShareCaptureOptions = {
+    video: true,
     resolution: {
       width: resolution.width,
       height: resolution.height,
@@ -538,7 +550,8 @@ export function buildScreenShareConfig(
       maxBitrate,
       maxFramerate: fps,
     },
-    simulcast: true,
+    simulcast: options.mode !== "text",
+    degradationPreference,
   };
 
   if (fps < 60) {

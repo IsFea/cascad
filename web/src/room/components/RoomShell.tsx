@@ -591,6 +591,7 @@ export function RoomShell(props: {
                 }}
                 startAdornment={<HearingIcon fontSize="small" />}
               >
+                <MenuItem value="">System default</MenuItem>
                 {media.outputDevices.map((device) => (
                   <MenuItem key={device.deviceId} value={device.deviceId}>
                     {device.label || "Speakers"}

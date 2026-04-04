@@ -464,6 +464,7 @@ function WorkspaceShell(props: {
     toggleShare: () => Promise<void>;
     openSettings: () => void;
   } | null>(null);
+  const autoMutedByDeafenRef = useRef(false);
   const [speakingUserIds, setSpeakingUserIds] = useState<Set<string>>(new Set());
 
   const [messageDraft, setMessageDraft] = useState("");
@@ -859,6 +860,7 @@ function WorkspaceShell(props: {
     setConnectedVoiceChannelId(null);
     setVoiceSession(null);
     voiceControlActionsRef.current = null;
+    autoMutedByDeafenRef.current = false;
     setVoiceControlState({ muted: false, sharing: false, connected: false });
     setSelfMuted(false);
     setSelfDeafened(false);
@@ -946,18 +948,37 @@ function WorkspaceShell(props: {
   const toggleSelfDeafen = async () => {
     const nextDeafened = !selfDeafened;
 
-    if (
-      nextDeafened &&
-      !selfMuted &&
-      voiceControlActionsRef.current &&
-      !voiceControlState.muted
-    ) {
-      await voiceControlActionsRef.current.toggleMute();
-      await applySelfState(true, true);
+    if (nextDeafened) {
+      if (
+        !selfMuted &&
+        voiceControlActionsRef.current &&
+        !voiceControlState.muted
+      ) {
+        await voiceControlActionsRef.current.toggleMute();
+        autoMutedByDeafenRef.current = true;
+        await applySelfState(true, true);
+        return;
+      }
+
+      autoMutedByDeafenRef.current = false;
+      await applySelfState(selfMuted, true);
       return;
     }
 
-    await applySelfState(selfMuted, nextDeafened);
+    if (
+      selfMuted &&
+      autoMutedByDeafenRef.current &&
+      voiceControlActionsRef.current &&
+      voiceControlState.muted
+    ) {
+      await voiceControlActionsRef.current.toggleMute();
+      autoMutedByDeafenRef.current = false;
+      await applySelfState(false, false);
+      return;
+    }
+
+    autoMutedByDeafenRef.current = false;
+    await applySelfState(selfMuted, false);
   };
 
   const sendLiveVoiceMessage = async (content: string) => {
@@ -1134,6 +1155,10 @@ function WorkspaceShell(props: {
     event: ReactMouseEvent<HTMLElement>,
     payload: { channelId: string; userId: string },
   ) => {
+    if (payload.userId === props.currentUser.id) {
+      return;
+    }
+
     if (!voiceSession) {
       setInfoMessage("Join this voice channel first to open participant controls.");
       return;
@@ -1343,6 +1368,7 @@ function WorkspaceShell(props: {
               <EmbeddedVoiceStage
                 session={voiceSession}
                 appToken={props.token}
+                selfDeafened={selfDeafened}
                 voiceMessages={liveVoiceMessages}
                 onSendVoiceMessage={sendLiveVoiceMessage}
                 onSpeakingUsersChange={setSpeakingUserIds}

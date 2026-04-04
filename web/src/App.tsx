@@ -59,6 +59,13 @@ import {
   WorkspaceMemberDto,
   WorkspaceBootstrapResponse,
 } from "./types";
+import {
+  isVoiceEarconCooldownPassed,
+  normalizeVoicePresenceChangedEvent,
+  patchWorkspaceMembersVoiceState,
+  resolveVoiceEarconType,
+  VoiceEarconType,
+} from "./voicePresence";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
 const TOKEN_KEY = "cascad_app_token";
@@ -66,6 +73,11 @@ const VOICE_TAB_INSTANCE_KEY = "cascad_voice_tab_instance_id";
 const AVATAR_CANVAS_SIZE = 256;
 
 const EMOJI_SET = ["😀", "😂", "😎", "🥳", "❤️", "🔥", "👍", "👏", "👀", "✅", "🎯", "🚀"];
+const EARCON_NOTE_MS = 85;
+const EARCON_GAP_MS = 25;
+const EARCON_MASTER_GAIN = 0.022;
+const EARCON_ATTACK_MS = 10;
+const EARCON_RELEASE_MS = 28;
 
 const theme = createTheme({
   palette: {
@@ -192,6 +204,65 @@ function mapVoiceToRoomSession(
     rtcUrl: voice.rtcUrl,
     sessionInstanceId: voice.sessionInstanceId,
   };
+}
+
+function getAudioContextConstructor(): typeof AudioContext | null {
+  const maybeContext = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  return maybeContext ?? null;
+}
+
+function scheduleEarconNote(
+  context: AudioContext,
+  destination: AudioNode,
+  startAt: number,
+  frequency: number,
+  durationSec: number,
+) {
+  const oscillator = context.createOscillator();
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(frequency, startAt);
+
+  const noteGain = context.createGain();
+  noteGain.gain.setValueAtTime(0.0001, startAt);
+  noteGain.gain.exponentialRampToValueAtTime(1, startAt + EARCON_ATTACK_MS / 1000);
+  noteGain.gain.exponentialRampToValueAtTime(
+    0.0001,
+    startAt + Math.max(durationSec - EARCON_RELEASE_MS / 1000, EARCON_ATTACK_MS / 1000),
+  );
+
+  oscillator.connect(noteGain);
+  noteGain.connect(destination);
+  oscillator.start(startAt);
+  oscillator.stop(startAt + durationSec);
+}
+
+async function playVoiceEarcon(context: AudioContext, type: VoiceEarconType) {
+  try {
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+  } catch {
+    return;
+  }
+
+  if (context.state !== "running") {
+    return;
+  }
+
+  const baseTime = context.currentTime + 0.002;
+  const noteDurationSec = EARCON_NOTE_MS / 1000;
+  const gapSec = EARCON_GAP_MS / 1000;
+  const frequencies = type === "join" ? [740, 932] : [932, 740];
+
+  const masterGain = context.createGain();
+  masterGain.gain.setValueAtTime(EARCON_MASTER_GAIN, baseTime);
+  masterGain.connect(context.destination);
+
+  scheduleEarconNote(context, masterGain, baseTime, frequencies[0], noteDurationSec);
+  scheduleEarconNote(context, masterGain, baseTime + noteDurationSec + gapSec, frequencies[1], noteDurationSec);
+
+  const endTime = baseTime + noteDurationSec * 2 + gapSec + 0.06;
+  masterGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
 }
 
 function renderMentions(content: string) {
@@ -498,6 +569,8 @@ function WorkspaceShell(props: {
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const hubRef = useRef<ReturnType<HubConnectionBuilder["build"]> | null>(null);
   const participantMenuSeqRef = useRef(1);
+  const voiceEarconContextRef = useRef<AudioContext | null>(null);
+  const lastVoiceEarconAtRef = useRef(0);
   const tabInstanceId = useMemo(() => {
     const existing = sessionStorage.getItem(VOICE_TAB_INSTANCE_KEY);
     if (existing) {
@@ -508,10 +581,54 @@ function WorkspaceShell(props: {
     sessionStorage.setItem(VOICE_TAB_INSTANCE_KEY, created);
     return created;
   }, []);
+  const workspaceId = workspaceData?.workspace.id ?? null;
 
   useEffect(() => {
     setCurrentAvatarUrl(props.currentUser.avatarUrl);
   }, [props.currentUser.avatarUrl]);
+
+  useEffect(() => {
+    return () => {
+      const context = voiceEarconContextRef.current;
+      if (!context) {
+        return;
+      }
+      void context.close().catch(() => undefined);
+      voiceEarconContextRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onGesture = () => {
+      let context = voiceEarconContextRef.current;
+      if (!context) {
+        const Ctor = getAudioContextConstructor();
+        if (!Ctor) {
+          return;
+        }
+
+        try {
+          context = new Ctor();
+        } catch {
+          return;
+        }
+
+        voiceEarconContextRef.current = context;
+      }
+
+      if (context.state === "suspended") {
+        void context.resume().catch(() => undefined);
+      }
+    };
+
+    window.addEventListener("pointerdown", onGesture);
+    window.addEventListener("keydown", onGesture);
+
+    return () => {
+      window.removeEventListener("pointerdown", onGesture);
+      window.removeEventListener("keydown", onGesture);
+    };
+  }, []);
 
   useEffect(() => {
     if (!voiceSession) {
@@ -594,6 +711,32 @@ function WorkspaceShell(props: {
       props.token,
     );
     setMessages(response.messages);
+  };
+
+  const tryPlayVoiceEarcon = (type: VoiceEarconType) => {
+    const nowMs = performance.now();
+    if (!isVoiceEarconCooldownPassed(nowMs, lastVoiceEarconAtRef.current)) {
+      return;
+    }
+
+    let context = voiceEarconContextRef.current;
+    if (!context) {
+      const Ctor = getAudioContextConstructor();
+      if (!Ctor) {
+        return;
+      }
+
+      try {
+        context = new Ctor();
+      } catch {
+        return;
+      }
+
+      voiceEarconContextRef.current = context;
+    }
+
+    lastVoiceEarconAtRef.current = nowMs;
+    void playVoiceEarcon(context, type).catch(() => undefined);
   };
 
   const ensureVoiceSession = async (channelId: string) => {
@@ -696,9 +839,46 @@ function WorkspaceShell(props: {
       },
     );
 
+    hub.on("voicePresenceChanged", (rawEvent: unknown) => {
+      const event = normalizeVoicePresenceChangedEvent(rawEvent);
+      if (!event) {
+        return;
+      }
+
+      if (!workspaceId || event.workspaceId !== workspaceId) {
+        return;
+      }
+
+      setWorkspaceData((current) => {
+        if (!current || current.workspace.id !== event.workspaceId) {
+          return current;
+        }
+
+        const nextMembers = patchWorkspaceMembersVoiceState(current.members, event);
+        if (nextMembers === current.members) {
+          return current;
+        }
+
+        return {
+          ...current,
+          members: nextMembers,
+        };
+      });
+
+      const earconType = resolveVoiceEarconType(event, connectedVoiceChannelId, props.currentUser.id);
+      if (!earconType) {
+        return;
+      }
+
+      tryPlayVoiceEarcon(earconType);
+    });
+
     void hub
       .start()
       .then(async () => {
+        if (workspaceId) {
+          await hub.invoke("JoinWorkspace", workspaceId);
+        }
         if (selectedTextChannelId) {
           await hub.invoke("JoinTextChannel", selectedTextChannelId);
         }
@@ -711,7 +891,7 @@ function WorkspaceShell(props: {
     return () => {
       void hub.stop();
     };
-  }, [props.token, selectedTextChannelId, connectedVoiceChannelId]);
+  }, [props.token, selectedTextChannelId, connectedVoiceChannelId, workspaceId]);
 
   useEffect(() => {
     if (!connectedVoiceChannelId || !voiceSession?.sessionInstanceId) {

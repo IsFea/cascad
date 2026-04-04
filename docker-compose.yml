@@ -39,6 +39,8 @@ services:
       Cors__AllowedOrigins__1: ${CORS_ORIGIN_1:-http://localhost:5173}
     depends_on:
       - postgres
+    volumes:
+      - uploads-data:/app/uploads
 
   web:
     build:
@@ -93,3 +95,4 @@ volumes:
   postgres-data:
   caddy-data:
   caddy-config:
+  uploads-data:

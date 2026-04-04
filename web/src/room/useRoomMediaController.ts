@@ -319,9 +319,23 @@ export function useRoomMediaController(
       disableBoostPath(binding);
     }
 
-    const levels = resolvePlaybackLevels(requestedVolume, binding.boostSupported);
+    if (binding.boostSupported && binding.boostContext?.state === "closed") {
+      disableBoostPath(binding);
+    }
 
-    if (binding.boostSupported && binding.boostGainNode) {
+    if (binding.boostSupported && binding.boostContext?.state === "suspended") {
+      void binding.boostContext.resume().catch(() => {
+        // autoplay policies can reject resume without user gesture
+      });
+    }
+
+    const boostReady =
+      binding.boostSupported &&
+      binding.boostContext?.state === "running" &&
+      Boolean(binding.boostGainNode);
+    const levels = resolvePlaybackLevels(requestedVolume, boostReady);
+
+    if (boostReady && binding.boostGainNode) {
       binding.element.muted = true;
       binding.boostGainNode.gain.value = isMuted || isOutputSuppressed ? 0 : levels.gainValue;
     } else {

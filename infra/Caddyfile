@@ -6,6 +6,11 @@
     reverse_proxy api:8080
   }
 
+  @hubs path /hubs/*
+  handle @hubs {
+    reverse_proxy api:8080
+  }
+
   @uploads path /uploads/*
   handle @uploads {
     reverse_proxy api:8080
@@ -27,6 +32,11 @@ https://localhost {
 
   @api path /api/*
   handle @api {
+    reverse_proxy api:8080
+  }
+
+  @hubs path /hubs/*
+  handle @hubs {
     reverse_proxy api:8080
   }
 

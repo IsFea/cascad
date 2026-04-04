@@ -22,6 +22,29 @@ public sealed class ChatHub : Hub
         return Groups.AddToGroupAsync(Context.ConnectionId, ChatGroupNames.TextChannel(channelId));
     }
 
+    public async Task JoinWorkspace(Guid workspaceId)
+    {
+        if (Context.User is null || !Context.User.TryGetUserId(out var userId))
+        {
+            return;
+        }
+
+        var isMember = await _db.WorkspaceMembers.AnyAsync(
+            x => x.WorkspaceId == workspaceId && x.UserId == userId,
+            Context.ConnectionAborted);
+        if (!isMember)
+        {
+            return;
+        }
+
+        await Groups.AddToGroupAsync(Context.ConnectionId, ChatGroupNames.Workspace(workspaceId));
+    }
+
+    public Task LeaveWorkspace(Guid workspaceId)
+    {
+        return Groups.RemoveFromGroupAsync(Context.ConnectionId, ChatGroupNames.Workspace(workspaceId));
+    }
+
     public Task LeaveTextChannel(Guid channelId)
     {
         return Groups.RemoveFromGroupAsync(Context.ConnectionId, ChatGroupNames.TextChannel(channelId));

@@ -130,6 +130,18 @@ export type StreamPermitResponse = {
   maxConcurrentStreams: number | null;
 };
 
+export type VoicePresenceChangedEvent = {
+  workspaceId: string;
+  userId: string;
+  username: string;
+  avatarUrl: string | null;
+  previousVoiceChannelId: string | null;
+  currentVoiceChannelId: string | null;
+  isMuted: boolean;
+  isDeafened: boolean;
+  occurredAtUtc: string;
+};
+
 // Legacy room-session shape used by RoomShell.
 export type RoomDto = {
   id: string;

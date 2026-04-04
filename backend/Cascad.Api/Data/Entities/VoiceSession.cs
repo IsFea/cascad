@@ -14,6 +14,8 @@ public sealed class VoiceSession
 
     public bool IsDeafened { get; set; }
 
+    public string SessionInstanceId { get; set; } = string.Empty;
+
     public DateTime ConnectedAtUtc { get; set; } = DateTime.UtcNow;
 
     public DateTime LastSeenAtUtc { get; set; } = DateTime.UtcNow;

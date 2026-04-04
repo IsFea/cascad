@@ -137,6 +137,7 @@ public sealed class AppDbContext : DbContext
         {
             entity.HasKey(x => new { x.ChannelId, x.UserId });
             entity.HasIndex(x => x.UserId);
+            entity.Property(x => x.SessionInstanceId).HasMaxLength(80).IsRequired();
 
             entity.HasOne(x => x.Channel)
                 .WithMany(x => x.VoiceSessions)

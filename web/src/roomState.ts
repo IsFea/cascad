@@ -49,7 +49,13 @@ export type MicTrackOptions = {
   voiceIsolation?: boolean;
 };
 
-export type StreamResolutionPreset = "720p" | "1080p";
+export type StreamResolutionPreset =
+  | "auto"
+  | "240p"
+  | "360p"
+  | "480p"
+  | "720p"
+  | "1080p";
 
 export type StreamFpsPreset = 15 | 30 | 60;
 
@@ -80,7 +86,7 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
 };
 
 export const DEFAULT_STREAM_START_OPTIONS: StreamStartOptions = {
-  resolution: "1080p",
+  resolution: "auto",
   fps: 30,
   mode: "game",
   includeSystemAudio: true,
@@ -415,6 +421,46 @@ function bitrateByPreset(
   resolution: StreamResolutionPreset,
   fps: StreamFpsPreset,
 ): number {
+  if (resolution === "auto") {
+    if (fps === 60) {
+      return 5_000_000;
+    }
+    if (fps === 30) {
+      return 3_800_000;
+    }
+    return 2_200_000;
+  }
+
+  if (resolution === "240p") {
+    if (fps === 60) {
+      return 850_000;
+    }
+    if (fps === 30) {
+      return 650_000;
+    }
+    return 450_000;
+  }
+
+  if (resolution === "360p") {
+    if (fps === 60) {
+      return 1_500_000;
+    }
+    if (fps === 30) {
+      return 1_100_000;
+    }
+    return 800_000;
+  }
+
+  if (resolution === "480p") {
+    if (fps === 60) {
+      return 2_800_000;
+    }
+    if (fps === 30) {
+      return 1_900_000;
+    }
+    return 1_300_000;
+  }
+
   if (resolution === "720p") {
     if (fps === 60) {
       return 5_500_000;
@@ -441,9 +487,23 @@ function bitrateByPreset(
 function resolutionByPreset(
   resolution: StreamResolutionPreset,
 ): { width: number; height: number } {
-  return resolution === "1080p"
-    ? { width: 1920, height: 1080 }
-    : { width: 1280, height: 720 };
+  if (resolution === "1080p") {
+    return { width: 1920, height: 1080 };
+  }
+
+  if (resolution === "720p" || resolution === "auto") {
+    return { width: 1280, height: 720 };
+  }
+
+  if (resolution === "480p") {
+    return { width: 854, height: 480 };
+  }
+
+  if (resolution === "360p") {
+    return { width: 640, height: 360 };
+  }
+
+  return { width: 426, height: 240 };
 }
 
 export function buildScreenShareConfig(

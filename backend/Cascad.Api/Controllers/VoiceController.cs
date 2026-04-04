@@ -16,6 +16,8 @@ namespace Cascad.Api.Controllers;
 [Authorize]
 public sealed class VoiceController : ControllerBase
 {
+    private const string VoiceSessionReplacedCode = "VOICE_SESSION_REPLACED";
+    private static readonly TimeSpan VoiceSessionTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan StreamLeaseTtl = TimeSpan.FromSeconds(30);
 
     private readonly AppDbContext _db;
@@ -68,6 +70,8 @@ public sealed class VoiceController : ControllerBase
             return Forbid();
         }
 
+        await CleanupStaleVoiceStateAsync(cancellationToken);
+
         var existingSessions = await _db.VoiceSessions
             .Where(x => x.UserId == userId)
             .ToListAsync(cancellationToken);
@@ -91,6 +95,8 @@ public sealed class VoiceController : ControllerBase
             }
         }
 
+        var now = DateTime.UtcNow;
+        var sessionInstanceId = Guid.NewGuid().ToString("N");
         var current = existingSessions.SingleOrDefault(x => x.ChannelId == channel.Id);
         if (current is null)
         {
@@ -100,13 +106,15 @@ public sealed class VoiceController : ControllerBase
                 UserId = userId,
                 IsMuted = false,
                 IsDeafened = false,
-                ConnectedAtUtc = DateTime.UtcNow,
-                LastSeenAtUtc = DateTime.UtcNow
+                SessionInstanceId = sessionInstanceId,
+                ConnectedAtUtc = now,
+                LastSeenAtUtc = now
             });
         }
         else
         {
-            current.LastSeenAtUtc = DateTime.UtcNow;
+            current.SessionInstanceId = sessionInstanceId;
+            current.LastSeenAtUtc = now;
         }
 
         await _db.SaveChangesAsync(cancellationToken);
@@ -118,6 +126,7 @@ public sealed class VoiceController : ControllerBase
             channel.LiveKitRoomName ?? $"voice-{channel.Id:N}",
             rtcToken,
             _liveKitOptions.RtcUrl,
+            sessionInstanceId,
             channel.MaxParticipants,
             channel.MaxConcurrentStreams));
     }
@@ -133,17 +142,43 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        var sessions = await _db.VoiceSessions
-            .Where(x => x.UserId == userId && (!request.ChannelId.HasValue || x.ChannelId == request.ChannelId.Value))
+        var sessionsQuery = _db.VoiceSessions
+            .Where(x => x.UserId == userId && (!request.ChannelId.HasValue || x.ChannelId == request.ChannelId.Value));
+
+        if (!string.IsNullOrWhiteSpace(request.SessionInstanceId))
+        {
+            var trimmedSessionId = request.SessionInstanceId.Trim();
+            sessionsQuery = sessionsQuery.Where(x => x.SessionInstanceId == trimmedSessionId);
+        }
+
+        var sessions = await sessionsQuery
             .ToListAsync(cancellationToken);
         foreach (var session in sessions)
         {
             _db.VoiceSessions.Remove(session);
         }
 
-        var streams = await _db.VoiceStreamPublications
-            .Where(x => x.UserId == userId && (!request.ChannelId.HasValue || x.ChannelId == request.ChannelId.Value))
-            .ToListAsync(cancellationToken);
+        List<VoiceStreamPublication> streams;
+        if (!string.IsNullOrWhiteSpace(request.SessionInstanceId))
+        {
+            var channelIds = sessions.Select(x => x.ChannelId).Distinct().ToArray();
+            if (channelIds.Length == 0)
+            {
+                streams = new List<VoiceStreamPublication>();
+            }
+            else
+            {
+                streams = await _db.VoiceStreamPublications
+                    .Where(x => x.UserId == userId && channelIds.Contains(x.ChannelId))
+                    .ToListAsync(cancellationToken);
+            }
+        }
+        else
+        {
+            streams = await _db.VoiceStreamPublications
+                .Where(x => x.UserId == userId && (!request.ChannelId.HasValue || x.ChannelId == request.ChannelId.Value))
+                .ToListAsync(cancellationToken);
+        }
         foreach (var stream in streams)
         {
             _db.VoiceStreamPublications.Remove(stream);
@@ -155,6 +190,7 @@ public sealed class VoiceController : ControllerBase
 
     [HttpPost("self-state")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> UpdateSelfState(
         [FromBody] VoiceSelfStateRequest request,
@@ -165,6 +201,8 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
+        await CleanupStaleVoiceStateAsync(cancellationToken);
+
         var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == request.ChannelId && x.UserId == userId,
             cancellationToken);
@@ -173,9 +211,60 @@ public sealed class VoiceController : ControllerBase
             return NotFound();
         }
 
+        AdoptSessionInstanceIdIfMissing(session, request.SessionInstanceId);
+        if (IsSessionReplaced(session, request.SessionInstanceId))
+        {
+            return VoiceSessionReplaced();
+        }
+
         session.IsMuted = request.IsMuted;
         session.IsDeafened = request.IsDeafened;
         session.LastSeenAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    [HttpPost("heartbeat")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Heartbeat(
+        [FromBody] VoiceHeartbeatRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!User.TryGetUserId(out var userId))
+        {
+            return Unauthorized();
+        }
+
+        await CleanupStaleVoiceStateAsync(cancellationToken);
+
+        var session = await _db.VoiceSessions.SingleOrDefaultAsync(
+            x => x.ChannelId == request.ChannelId && x.UserId == userId,
+            cancellationToken);
+        if (session is null)
+        {
+            return NotFound();
+        }
+
+        AdoptSessionInstanceIdIfMissing(session, request.SessionInstanceId);
+        if (IsSessionReplaced(session, request.SessionInstanceId))
+        {
+            return VoiceSessionReplaced();
+        }
+
+        var now = DateTime.UtcNow;
+        session.LastSeenAtUtc = now;
+
+        var stream = await _db.VoiceStreamPublications.SingleOrDefaultAsync(
+            x => x.ChannelId == request.ChannelId && x.UserId == userId,
+            cancellationToken);
+        if (stream is not null)
+        {
+            stream.IsActive = true;
+            stream.LastSeenAtUtc = now;
+        }
+
         await _db.SaveChangesAsync(cancellationToken);
         return NoContent();
     }
@@ -239,9 +328,37 @@ public sealed class VoiceController : ControllerBase
         return NoContent();
     }
 
+    [HttpPost("moderation/deafen")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> DeafenMember(
+        [FromBody] VoiceDeafenRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (User.GetPlatformRole() != PlatformRole.Admin)
+        {
+            return Forbid();
+        }
+
+        var session = await _db.VoiceSessions.SingleOrDefaultAsync(
+            x => x.ChannelId == request.ChannelId && x.UserId == request.TargetUserId,
+            cancellationToken);
+        if (session is null)
+        {
+            return NotFound();
+        }
+
+        session.IsDeafened = request.IsDeafened;
+        session.LastSeenAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
     [HttpPost("streams/permit")]
     [ProducesResponseType<StreamPermitResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<StreamPermitResponse>> PermitStream(
         [FromBody] StreamPermitRequest request,
@@ -252,6 +369,8 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
+        await CleanupStaleVoiceStateAsync(cancellationToken);
+
         var channel = await _db.Channels.SingleOrDefaultAsync(
             x => x.Id == request.ChannelId && !x.IsDeleted,
             cancellationToken);
@@ -260,15 +379,22 @@ public sealed class VoiceController : ControllerBase
             return NotFound();
         }
 
-        var hasSession = await _db.VoiceSessions.AnyAsync(
+        var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == channel.Id && x.UserId == userId,
             cancellationToken);
-        if (!hasSession)
+        if (session is null)
         {
             return Forbid();
         }
 
+        AdoptSessionInstanceIdIfMissing(session, request.SessionInstanceId);
+        if (IsSessionReplaced(session, request.SessionInstanceId))
+        {
+            return VoiceSessionReplaced();
+        }
+
         var now = DateTime.UtcNow;
+        session.LastSeenAtUtc = now;
         var staleCutoff = now - StreamLeaseTtl;
         var staleEntries = await _db.VoiceStreamPublications
             .Where(x => x.ChannelId == channel.Id && x.LastSeenAtUtc < staleCutoff)
@@ -320,6 +446,7 @@ public sealed class VoiceController : ControllerBase
 
     [HttpPost("streams/release")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> ReleaseStream(
         [FromBody] StreamPermitRequest request,
         CancellationToken cancellationToken)
@@ -327,6 +454,27 @@ public sealed class VoiceController : ControllerBase
         if (!User.TryGetUserId(out var userId))
         {
             return Unauthorized();
+        }
+
+        await CleanupStaleVoiceStateAsync(cancellationToken);
+
+        var session = await _db.VoiceSessions.SingleOrDefaultAsync(
+            x => x.ChannelId == request.ChannelId && x.UserId == userId,
+            cancellationToken);
+
+        if (session is not null)
+        {
+            AdoptSessionInstanceIdIfMissing(session, request.SessionInstanceId);
+        }
+
+        if (session is not null && IsSessionReplaced(session, request.SessionInstanceId))
+        {
+            return VoiceSessionReplaced();
+        }
+
+        if (session is not null)
+        {
+            session.LastSeenAtUtc = DateTime.UtcNow;
         }
 
         var stream = await _db.VoiceStreamPublications.SingleOrDefaultAsync(
@@ -339,5 +487,74 @@ public sealed class VoiceController : ControllerBase
         }
 
         return NoContent();
+    }
+
+    private static bool IsSessionReplaced(VoiceSession session, string? requestSessionInstanceId)
+    {
+        if (string.IsNullOrWhiteSpace(requestSessionInstanceId))
+        {
+            return false;
+        }
+
+        return !string.Equals(
+            session.SessionInstanceId,
+            requestSessionInstanceId.Trim(),
+            StringComparison.Ordinal);
+    }
+
+    private static void AdoptSessionInstanceIdIfMissing(VoiceSession session, string? requestSessionInstanceId)
+    {
+        if (!string.IsNullOrWhiteSpace(session.SessionInstanceId))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(requestSessionInstanceId))
+        {
+            return;
+        }
+
+        session.SessionInstanceId = requestSessionInstanceId.Trim();
+    }
+
+    private ObjectResult VoiceSessionReplaced()
+    {
+        var details = new ProblemDetails
+        {
+            Title = "Voice session replaced by another tab.",
+            Status = StatusCodes.Status409Conflict
+        };
+        details.Extensions["code"] = VoiceSessionReplacedCode;
+        return StatusCode(StatusCodes.Status409Conflict, details);
+    }
+
+    private async Task CleanupStaleVoiceStateAsync(CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        var staleSessionCutoff = now - VoiceSessionTtl;
+        var staleStreamCutoff = now - StreamLeaseTtl;
+
+        var staleSessions = await _db.VoiceSessions
+            .Where(x => x.LastSeenAtUtc < staleSessionCutoff)
+            .ToListAsync(cancellationToken);
+
+        if (staleSessions.Count > 0)
+        {
+            _db.VoiceSessions.RemoveRange(staleSessions);
+        }
+
+        var staleStreams = await _db.VoiceStreamPublications
+            .Where(x => x.LastSeenAtUtc < staleStreamCutoff)
+            .ToListAsync(cancellationToken);
+
+        if (staleStreams.Count > 0)
+        {
+            _db.VoiceStreamPublications.RemoveRange(staleStreams);
+        }
+
+        if (staleSessions.Count > 0 || staleStreams.Count > 0)
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
     }
 }

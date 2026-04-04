@@ -6,5 +6,6 @@ public sealed record VoiceConnectResponse(
     string LiveKitRoomName,
     string RtcToken,
     string RtcUrl,
+    string SessionInstanceId,
     int? MaxParticipants,
     int? MaxConcurrentStreams);

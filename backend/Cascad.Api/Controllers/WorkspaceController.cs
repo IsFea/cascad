@@ -14,6 +14,8 @@ namespace Cascad.Api.Controllers;
 [Authorize]
 public sealed class WorkspaceController : ControllerBase
 {
+    private static readonly TimeSpan VoiceSessionTtl = TimeSpan.FromSeconds(30);
+
     private readonly AppDbContext _db;
 
     public WorkspaceController(AppDbContext db)
@@ -69,6 +71,8 @@ public sealed class WorkspaceController : ControllerBase
             });
             await _db.SaveChangesAsync(cancellationToken);
         }
+
+        await CleanupStaleVoiceStateAsync(cancellationToken);
 
         var channels = await _db.Channels
             .Where(x => x.WorkspaceId == workspace.Id && !x.IsDeleted)
@@ -245,5 +249,31 @@ public sealed class WorkspaceController : ControllerBase
     private static UserDto ToUserDto(AppUser user)
     {
         return new UserDto(user.Id, user.Username, user.Status, user.PlatformRole, user.AvatarUrl);
+    }
+
+    private async Task CleanupStaleVoiceStateAsync(CancellationToken cancellationToken)
+    {
+        var cutoff = DateTime.UtcNow - VoiceSessionTtl;
+
+        var staleSessions = await _db.VoiceSessions
+            .Where(x => x.LastSeenAtUtc < cutoff)
+            .ToListAsync(cancellationToken);
+        if (staleSessions.Count > 0)
+        {
+            _db.VoiceSessions.RemoveRange(staleSessions);
+        }
+
+        var staleStreams = await _db.VoiceStreamPublications
+            .Where(x => x.LastSeenAtUtc < cutoff)
+            .ToListAsync(cancellationToken);
+        if (staleStreams.Count > 0)
+        {
+            _db.VoiceStreamPublications.RemoveRange(staleStreams);
+        }
+
+        if (staleSessions.Count > 0 || staleStreams.Count > 0)
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
     }
 }

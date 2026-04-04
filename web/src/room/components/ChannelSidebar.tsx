@@ -1,16 +1,26 @@
+import AddIcon from "@mui/icons-material/Add";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
-import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
-import ChevronRightIcon from "@mui/icons-material/ChevronRight";
-import ForumOutlinedIcon from "@mui/icons-material/ForumOutlined";
-import GraphicEqIcon from "@mui/icons-material/GraphicEq";
+import GraphicEqRoundedIcon from "@mui/icons-material/GraphicEqRounded";
+import HeadsetOffIcon from "@mui/icons-material/HeadsetOff";
+import HeadsetIcon from "@mui/icons-material/Headset";
+import LogoutIcon from "@mui/icons-material/Logout";
+import MicIcon from "@mui/icons-material/Mic";
+import MicOffIcon from "@mui/icons-material/MicOff";
+import ScreenShareIcon from "@mui/icons-material/ScreenShare";
+import SettingsIcon from "@mui/icons-material/Settings";
+import StopScreenShareIcon from "@mui/icons-material/StopScreenShare";
+import { MouseEvent } from "react";
 import TagIcon from "@mui/icons-material/Tag";
-import VolumeUpIcon from "@mui/icons-material/VolumeUp";
+import VolumeUpOutlinedIcon from "@mui/icons-material/VolumeUpOutlined";
 import { alpha } from "@mui/material/styles";
 import {
+  Avatar,
+  Badge,
   Box,
   Divider,
   IconButton,
   List,
+  ListItemAvatar,
   ListItemButton,
   ListItemIcon,
   ListItemText,
@@ -19,70 +29,64 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import { ChannelDto, UserDto, WorkspaceMemberDto } from "../../types";
+import { initials } from "../utils";
 
 export function ChannelSidebar(props: {
-  collapsed: boolean;
-  narrowMode: boolean;
-  activeVoiceChannelId: string;
-  activeTextChannelId: string;
-  onToggleCollapsed: () => void;
+  workspaceName: string;
+  currentUser: UserDto;
+  currentAvatarUrl: string | null;
+  textChannels: ChannelDto[];
+  voiceChannels: ChannelDto[];
+  members: WorkspaceMemberDto[];
+  speakingUserIds: Set<string>;
+  selectedTextChannelId: string | null;
+  selectedVoiceChannelId: string | null;
+  connectedVoiceChannelId: string | null;
+  selfMuted: boolean;
+  selfDeafened: boolean;
+  canManageChannels: boolean;
+  pendingApprovalsCount: number;
   onSelectVoiceChannel: (channelId: string) => void;
+  onConnectVoiceChannel: (channelId: string) => void;
   onSelectTextChannel: (channelId: string) => void;
+  onCreateChannel: (type: "Text" | "Voice") => void;
+  onOpenServerSettings: () => void;
+  onToggleSelfMute: () => void;
+  onToggleSelfDeafen: () => void;
+  onToggleShare: () => void;
+  onOpenVoiceSettings: () => void;
+  onDisconnectVoice: () => void;
+  onPickAvatar: () => void;
+  onLogout: () => void;
+  onParticipantContextMenu: (
+    event: MouseEvent<HTMLElement>,
+    payload: {
+      channelId: string;
+      userId: string;
+    },
+  ) => void;
+  sharing: boolean;
+  shareEnabled: boolean;
 }) {
-  const voiceChannels = [{ id: "voice-main", name: "Squad room" }];
-  const textChannels = [
-    { id: "chat-general", name: "general", soon: true },
-    { id: "chat-team", name: "team-chat", soon: true },
-  ];
+  const membersByVoiceChannel = props.voiceChannels.reduce<Record<string, WorkspaceMemberDto[]>>(
+    (acc, channel) => {
+      acc[channel.id] = props.members.filter(
+        (member) => member.connectedVoiceChannelId === channel.id,
+      );
+      return acc;
+    },
+    {},
+  );
 
-  if (props.collapsed) {
-    return (
-      <Paper
-        sx={{
-          p: 0.6,
-          height: "100%",
-          minHeight: 0,
-          overflowY: "auto",
-          display: "flex",
-          flexDirection: "column",
-          gap: 0.8,
-          alignItems: "center",
-        }}
-      >
-        {!props.narrowMode && (
-          <Tooltip title="Expand sidebar" placement="right">
-            <IconButton size="small" onClick={props.onToggleCollapsed}>
-              <ChevronRightIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        )}
-
-        <Tooltip title="Voice channel" placement="right">
-          <IconButton
-            size="small"
-            color="primary"
-            onClick={() => props.onSelectVoiceChannel("voice-main")}
-          >
-            <VolumeUpIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-
-        <Tooltip title="Text channels (soon)" placement="right">
-          <IconButton
-            size="small"
-            onClick={() => props.onSelectTextChannel("chat-general")}
-          >
-            <ForumOutlinedIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-      </Paper>
-    );
-  }
+  const connectedVoiceName =
+    props.voiceChannels.find((channel) => channel.id === props.connectedVoiceChannelId)?.name ??
+    null;
 
   return (
     <Paper
       sx={{
-        p: 1,
+        p: 1.1,
         height: "100%",
         minHeight: 0,
         overflow: "hidden",
@@ -90,17 +94,20 @@ export function ChannelSidebar(props: {
         flexDirection: "column",
       }}
     >
-      <Stack direction="row" alignItems="center" justifyContent="space-between">
-        <Stack direction="row" spacing={0.8} alignItems="center">
-          <GraphicEqIcon color="primary" fontSize="small" />
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-            Workspace
-          </Typography>
-        </Stack>
-        {!props.narrowMode && (
-          <Tooltip title="Collapse sidebar">
-            <IconButton size="small" onClick={props.onToggleCollapsed}>
-              <ChevronLeftIcon fontSize="small" />
+      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 700 }} noWrap>
+          {props.workspaceName}
+        </Typography>
+        {props.currentUser.role === "Admin" && (
+          <Tooltip title="Server settings">
+            <IconButton size="small" aria-label="Server settings" onClick={props.onOpenServerSettings}>
+              <Badge
+                color="error"
+                variant={props.pendingApprovalsCount > 0 ? "dot" : "standard"}
+                overlap="circular"
+              >
+                <SettingsIcon fontSize="small" />
+              </Badge>
             </IconButton>
           </Tooltip>
         )}
@@ -109,64 +116,157 @@ export function ChannelSidebar(props: {
       <Divider sx={{ my: 1 }} />
 
       <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-        <Typography
-          variant="caption"
-          sx={{
-            px: 1,
-            py: 0.5,
-            color: "text.secondary",
-            display: "block",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-          }}
+        <Stack
+          direction="row"
+          alignItems="center"
+          justifyContent="space-between"
+          sx={{ px: 0.7, pb: 0.45 }}
         >
-          Voice channels
-        </Typography>
-        <List dense disablePadding>
-          {voiceChannels.map((channel) => (
-            <ListItemButton
-              key={channel.id}
-              selected={props.activeVoiceChannelId === channel.id}
-              onClick={() => props.onSelectVoiceChannel(channel.id)}
-              sx={{
-                borderRadius: 1.2,
-                mb: 0.3,
-                "&.Mui-selected": {
-                  bgcolor: alpha("#6da7ff", 0.15),
-                },
-              }}
+          <Typography
+            variant="caption"
+            sx={{
+              color: "text.secondary",
+              display: "block",
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+          >
+            Voice channels
+          </Typography>
+          {props.canManageChannels && (
+            <IconButton
+              size="small"
+              aria-label="Create voice channel"
+              onClick={() => props.onCreateChannel("Voice")}
             >
-              <ListItemIcon sx={{ minWidth: 30 }}>
-                <VolumeUpIcon fontSize="small" />
-              </ListItemIcon>
-              <ListItemText
-                primary={channel.name}
-                secondary="Active now"
-                primaryTypographyProps={{ fontSize: "0.88rem", fontWeight: 600 }}
-              />
-            </ListItemButton>
-          ))}
+              <AddIcon fontSize="small" />
+            </IconButton>
+          )}
+        </Stack>
+        <List dense disablePadding>
+          {props.voiceChannels.map((channel) => {
+            const isConnected = props.connectedVoiceChannelId === channel.id;
+            const participants = membersByVoiceChannel[channel.id] ?? [];
+            const maxParticipantsLabel = channel.maxParticipants ?? "∞";
+
+            return (
+              <Box key={channel.id}>
+                <ListItemButton
+                  selected={props.selectedVoiceChannelId === channel.id}
+                  onClick={() => props.onSelectVoiceChannel(channel.id)}
+                  onDoubleClick={() => props.onConnectVoiceChannel(channel.id)}
+                  sx={{
+                    borderRadius: 1.2,
+                    mb: 0.2,
+                    "&.Mui-selected": {
+                      bgcolor: alpha("#6da7ff", 0.16),
+                    },
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30 }}>
+                    <VolumeUpOutlinedIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={channel.name}
+                    secondary={isConnected ? "Connected" : undefined}
+                    primaryTypographyProps={{ fontSize: "0.89rem", fontWeight: 600 }}
+                    secondaryTypographyProps={{ fontSize: "0.72rem" }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ ml: 0.8 }}>
+                    ({participants.length}/{maxParticipantsLabel})
+                  </Typography>
+                </ListItemButton>
+
+                {participants.length > 0 && (
+                  <List dense disablePadding sx={{ ml: 2.8, mb: 0.4 }}>
+                    {participants.map((participant) => {
+                      const isSpeaking = props.speakingUserIds.has(participant.userId);
+                      return (
+                        <ListItemButton
+                          key={`${channel.id}-${participant.userId}`}
+                          sx={{
+                            borderRadius: 1,
+                            mb: 0.2,
+                            py: 0.2,
+                            px: 0.6,
+                            minHeight: 28,
+                            "&:hover": {
+                              bgcolor: alpha("#8ab8ff", 0.08),
+                            },
+                          }}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            props.onParticipantContextMenu(event, {
+                              channelId: channel.id,
+                              userId: participant.userId,
+                            });
+                          }}
+                        >
+                          <ListItemAvatar sx={{ minWidth: 26 }}>
+                            <Avatar
+                              src={participant.avatarUrl ?? undefined}
+                              sx={{
+                                width: 18,
+                                height: 18,
+                                fontSize: "0.56rem",
+                                border: isSpeaking
+                                  ? "2px solid rgba(86, 224, 147, 0.95)"
+                                  : "2px solid rgba(94, 116, 141, 0.6)",
+                              }}
+                            >
+                              {initials(participant.username)}
+                            </Avatar>
+                          </ListItemAvatar>
+                          <ListItemText
+                            primary={participant.username}
+                            primaryTypographyProps={{
+                              fontSize: "0.73rem",
+                              color: isSpeaking ? "secondary.main" : "text.secondary",
+                            }}
+                          />
+                        </ListItemButton>
+                      );
+                    })}
+                  </List>
+                )}
+              </Box>
+            );
+          })}
         </List>
 
-        <Typography
-          variant="caption"
-          sx={{
-            px: 1,
-            pt: 1.1,
-            pb: 0.5,
-            color: "text.secondary",
-            display: "block",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-          }}
+        <Stack
+          direction="row"
+          alignItems="center"
+          justifyContent="space-between"
+          sx={{ px: 0.7, pt: 1, pb: 0.45 }}
         >
-          Text channels
-        </Typography>
+          <Typography
+            variant="caption"
+            sx={{
+              color: "text.secondary",
+              display: "block",
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+          >
+            Text channels
+          </Typography>
+          {props.canManageChannels && (
+            <IconButton
+              size="small"
+              aria-label="Create text channel"
+              onClick={() => props.onCreateChannel("Text")}
+            >
+              <AddIcon fontSize="small" />
+            </IconButton>
+          )}
+        </Stack>
         <List dense disablePadding>
-          {textChannels.map((channel) => (
+          {props.textChannels.map((channel) => (
             <ListItemButton
               key={channel.id}
-              selected={props.activeTextChannelId === channel.id}
+              selected={props.selectedTextChannelId === channel.id}
               onClick={() => props.onSelectTextChannel(channel.id)}
               sx={{
                 borderRadius: 1.2,
@@ -177,21 +277,142 @@ export function ChannelSidebar(props: {
               }}
             >
               <ListItemIcon sx={{ minWidth: 30 }}>
-                {channel.id === "chat-general" ? (
-                  <ChatBubbleOutlineIcon fontSize="small" />
-                ) : (
-                  <TagIcon fontSize="small" />
-                )}
+                {channel.position === 1 ? <ChatBubbleOutlineIcon fontSize="small" /> : <TagIcon fontSize="small" />}
               </ListItemIcon>
               <ListItemText
                 primary={channel.name}
-                secondary={channel.soon ? "Soon" : undefined}
                 primaryTypographyProps={{ fontSize: "0.86rem" }}
               />
             </ListItemButton>
           ))}
         </List>
       </Box>
+
+      <Divider sx={{ my: 1 }} />
+
+      {props.connectedVoiceChannelId && (
+        <Box
+          sx={{
+            px: 0.8,
+            py: 0.75,
+            borderRadius: 1.2,
+            bgcolor: alpha("#52d29b", 0.12),
+            border: "1px solid rgba(82, 210, 155, 0.38)",
+            mb: 0.8,
+          }}
+        >
+          <Stack direction="row" spacing={0.7} alignItems="center" sx={{ mb: 0.65 }}>
+            <GraphicEqRoundedIcon sx={{ color: "secondary.main", fontSize: 16 }} />
+            <Typography variant="caption" sx={{ fontWeight: 700 }}>
+              Voice connected
+            </Typography>
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.8 }}>
+            {connectedVoiceName ?? "Voice channel"}
+          </Typography>
+          <Stack direction="row" spacing={0.45}>
+            <Tooltip title={props.selfMuted ? "Unmute" : "Mute"}>
+              <IconButton
+                size="small"
+                aria-label={props.selfMuted ? "Unmute" : "Mute"}
+                onClick={props.onToggleSelfMute}
+              >
+                {props.selfMuted ? <MicOffIcon fontSize="small" color="error" /> : <MicIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
+            <Tooltip title={props.selfDeafened ? "Undeafen" : "Deafen"}>
+              <IconButton
+                size="small"
+                aria-label={props.selfDeafened ? "Undeafen" : "Deafen"}
+                onClick={props.onToggleSelfDeafen}
+              >
+                {props.selfDeafened ? (
+                  <HeadsetOffIcon fontSize="small" color="error" />
+                ) : (
+                  <HeadsetIcon fontSize="small" />
+                )}
+              </IconButton>
+            </Tooltip>
+            <Tooltip title={props.sharing ? "Stop share" : "Share screen"}>
+              <IconButton
+                size="small"
+                aria-label={props.sharing ? "Stop share" : "Share screen"}
+                onClick={props.onToggleShare}
+                disabled={!props.shareEnabled}
+              >
+                {props.sharing ? (
+                  <StopScreenShareIcon fontSize="small" color="error" />
+                ) : (
+                  <ScreenShareIcon fontSize="small" />
+                )}
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Voice settings">
+              <IconButton
+                size="small"
+                aria-label="Voice settings"
+                onClick={props.onOpenVoiceSettings}
+              >
+                <SettingsIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Leave voice">
+              <IconButton
+                size="small"
+                aria-label="Leave voice"
+                onClick={props.onDisconnectVoice}
+                sx={{
+                  color: "error.light",
+                  bgcolor: alpha("#f16d7f", 0.14),
+                  "&:hover": {
+                    bgcolor: alpha("#f16d7f", 0.24),
+                  },
+                }}
+              >
+                <LogoutIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+        </Box>
+      )}
+
+      <Stack
+        direction="row"
+        spacing={0.8}
+        alignItems="center"
+        sx={{
+          borderRadius: 1.2,
+          p: 0.7,
+          bgcolor: alpha("#8cb3f4", 0.1),
+          border: "1px solid rgba(131, 153, 183, 0.33)",
+        }}
+      >
+        <Tooltip title="Update avatar">
+          <IconButton
+            size="small"
+            sx={{ p: 0 }}
+            aria-label="Update avatar"
+            onClick={props.onPickAvatar}
+          >
+            <Avatar src={props.currentAvatarUrl ?? undefined} sx={{ width: 30, height: 30 }}>
+              {initials(props.currentUser.username)}
+            </Avatar>
+          </IconButton>
+        </Tooltip>
+        <Box sx={{ minWidth: 0, flex: 1 }}>
+          <Typography variant="body2" noWrap sx={{ fontWeight: 700 }}>
+            {props.currentUser.username}
+          </Typography>
+          <Typography variant="caption" color="text.secondary" noWrap>
+            {props.currentUser.role}
+          </Typography>
+        </Box>
+        <Tooltip title="Logout">
+          <IconButton size="small" aria-label="Logout" onClick={props.onLogout}>
+            <LogoutIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Stack>
     </Paper>
   );
 }

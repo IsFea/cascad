@@ -31,6 +31,7 @@ export type ParticipantAudioMenuState = {
   identity: string;
   mouseX: number;
   mouseY: number;
+  channelId?: string;
   scope: "normal" | "fullscreen-avatar" | "participant-rail";
 };
 

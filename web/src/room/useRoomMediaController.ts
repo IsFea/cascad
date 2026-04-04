@@ -68,7 +68,7 @@ type UseRoomMediaControllerResult = {
   setLayoutMode: (mode: StreamLayoutMode) => void;
   setFocusedStream: (sid: string | null) => void;
   toggleLocalMute: () => Promise<void>;
-  startScreenShare: () => Promise<void>;
+  startScreenShare: () => Promise<boolean>;
   stopScreenShare: () => Promise<void>;
   changeMicrophoneDevice: (deviceId: string) => Promise<void>;
   changeOutputDevice: (deviceId: string) => Promise<void>;
@@ -132,6 +132,9 @@ export function useRoomMediaController(
   const voiceActivityRef = useRef<Set<string>>(new Set());
   const screenAudioActivityRef = useRef<Set<string>>(new Set());
   const syncQueuedRef = useRef(false);
+  const localVoiceAnalyserRef = useRef<ReturnType<typeof createAudioAnalyser> | null>(null);
+  const localVoiceActivityIntervalIdRef = useRef<number | null>(null);
+  const localVoiceActiveUntilMsRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     mutedRef.current = muted;
@@ -399,9 +402,57 @@ export function useRoomMediaController(
     }
   };
 
+  const clearLocalVoiceActivity = (identity?: string) => {
+    if (localVoiceActivityIntervalIdRef.current !== null) {
+      window.clearInterval(localVoiceActivityIntervalIdRef.current);
+      localVoiceActivityIntervalIdRef.current = null;
+    }
+
+    if (localVoiceAnalyserRef.current) {
+      void localVoiceAnalyserRef.current.cleanup();
+      localVoiceAnalyserRef.current = null;
+    }
+
+    localVoiceActiveUntilMsRef.current = undefined;
+    if (identity) {
+      setSourceActivity(identity, "voice", false);
+    }
+  };
+
+  const setupLocalVoiceActivity = (track: LocalAudioTrack, identity: string) => {
+    clearLocalVoiceActivity(identity);
+
+    try {
+      const analyser = createAudioAnalyser(track, { cloneTrack: false });
+      localVoiceAnalyserRef.current = analyser;
+      localVoiceActivityIntervalIdRef.current = window.setInterval(() => {
+        if (!localVoiceAnalyserRef.current || mutedRef.current) {
+          setSourceActivity(identity, "voice", false);
+          return;
+        }
+
+        const level = localVoiceAnalyserRef.current.calculateVolume();
+        const now = Date.now();
+        const activity = resolveActivityWithHold(
+          level,
+          0.035,
+          now,
+          localVoiceActiveUntilMsRef.current,
+          VOICE_ACTIVE_HOLD_MS,
+        );
+
+        localVoiceActiveUntilMsRef.current = activity.activeUntilMs;
+        setSourceActivity(identity, "voice", activity.isActive);
+      }, 160);
+    } catch {
+      // local analyser support is browser-dependent
+    }
+  };
+
   const syncParticipants = (room: Room) => {
     const remoteParticipants = Array.from(room.remoteParticipants.values());
     const remoteIdentitySet = new Set(remoteParticipants.map((item) => item.identity));
+    const localIdentity = room.localParticipant.identity;
 
     const cleanupMap = <T,>(map: Record<string, T>) => {
       for (const identity of Object.keys(map)) {
@@ -417,18 +468,17 @@ export function useRoomMediaController(
     cleanupMap(streamMuteMapRef.current);
 
     for (const identity of Array.from(voiceActivityRef.current.values())) {
-      if (!remoteIdentitySet.has(identity)) {
+      if (!remoteIdentitySet.has(identity) && identity !== localIdentity) {
         voiceActivityRef.current.delete(identity);
       }
     }
 
     for (const identity of Array.from(screenAudioActivityRef.current.values())) {
-      if (!remoteIdentitySet.has(identity)) {
+      if (!remoteIdentitySet.has(identity) && identity !== localIdentity) {
         screenAudioActivityRef.current.delete(identity);
       }
     }
 
-    const localIdentity = room.localParticipant.identity;
     const localState: ParticipantState = {
       identity: localIdentity,
       displayName: resolveDisplayName(room.localParticipant, session.user.username),
@@ -544,7 +594,10 @@ export function useRoomMediaController(
   };
 
   const createAndPublishMicrophoneTrack = async (room: Room, deviceId?: string) => {
+    const localIdentity = room.localParticipant.identity;
+
     if (localAudioRef.current) {
+      clearLocalVoiceActivity(localIdentity);
       await room.localParticipant.unpublishTrack(localAudioRef.current);
       localAudioRef.current.stop();
       localAudioRef.current = null;
@@ -561,6 +614,7 @@ export function useRoomMediaController(
     }
 
     localAudioRef.current = microphone;
+    setupLocalVoiceActivity(microphone, localIdentity);
   };
 
   useEffect(() => {
@@ -764,6 +818,7 @@ export function useRoomMediaController(
 
       void room.disconnect();
 
+      clearLocalVoiceActivity(room.localParticipant.identity);
       localAudioRef.current?.stop();
       localAudioRef.current = null;
 
@@ -841,6 +896,9 @@ export function useRoomMediaController(
     }
 
     const localIdentity = roomRef.current?.localParticipant.identity ?? session.user.id;
+    if (nextMuted) {
+      setSourceActivity(localIdentity, "voice", false);
+    }
     patchParticipant(localIdentity, { voiceMutedLocal: nextMuted });
   };
 
@@ -862,7 +920,7 @@ export function useRoomMediaController(
 
   const startScreenShare = async () => {
     if (!roomRef.current) {
-      return;
+      return false;
     }
 
     try {
@@ -894,11 +952,13 @@ export function useRoomMediaController(
       }
 
       setSharing(true);
+      return true;
     } catch (reason) {
       const message =
         reason instanceof Error ? reason.message : "Failed to start screen share.";
       setError(message);
       setSharing(roomRef.current.localParticipant.isScreenShareEnabled);
+      return false;
     }
   };
 

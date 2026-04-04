@@ -66,12 +66,15 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
                 "UserId" uuid NOT NULL,
                 "IsMuted" boolean NOT NULL,
                 "IsDeafened" boolean NOT NULL,
+                "SessionInstanceId" character varying(80) NOT NULL,
                 "ConnectedAtUtc" timestamp with time zone NOT NULL,
                 "LastSeenAtUtc" timestamp with time zone NOT NULL,
                 CONSTRAINT "PK_VoiceSessions" PRIMARY KEY ("ChannelId", "UserId"),
                 CONSTRAINT "FK_VoiceSessions_Channels_ChannelId" FOREIGN KEY ("ChannelId") REFERENCES "Channels" ("Id") ON DELETE CASCADE,
                 CONSTRAINT "FK_VoiceSessions_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
             );
+
+            ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "SessionInstanceId" character varying(80) NOT NULL DEFAULT '';
 
             CREATE TABLE IF NOT EXISTS "VoiceStreamPublications" (
                 "ChannelId" uuid NOT NULL,

@@ -17,6 +17,7 @@ import {
   InputLabel,
   MenuItem,
   Popover,
+  Paper,
   Select,
   Stack,
   Switch,
@@ -57,7 +58,6 @@ import {
   StreamContextMenuState,
 } from "../types";
 import { useRoomMediaController } from "../useRoomMediaController";
-import { ChannelSidebar } from "./ChannelSidebar";
 import { FullscreenStreamLayer } from "./FullscreenStreamLayer";
 import { ParticipantAudioMenu } from "./ParticipantAudioMenu";
 import { ParticipantsPanel } from "./ParticipantsPanel";
@@ -229,6 +229,7 @@ export function RoomShell(props: {
         },
         body: JSON.stringify({
           channelId: props.session.room.id,
+          sessionInstanceId: props.session.sessionInstanceId ?? "",
         }),
       }).catch(() => undefined);
       return;
@@ -243,6 +244,7 @@ export function RoomShell(props: {
         },
         body: JSON.stringify({
           channelId: props.session.room.id,
+          sessionInstanceId: props.session.sessionInstanceId ?? "",
         }),
       });
 
@@ -522,8 +524,10 @@ export function RoomShell(props: {
           <Button
             variant="contained"
             onClick={() => {
-              void media.startScreenShare().then(() => {
-                setShareDialogOpen(false);
+              void media.startScreenShare().then((started) => {
+                if (started) {
+                  setShareDialogOpen(false);
+                }
               });
             }}
           >
@@ -692,31 +696,18 @@ export function RoomShell(props: {
           }}
         >
           {!isTheaterMode && (
-            <ChannelSidebar
-              collapsed={shellLayout.leftSidebarCollapsed || preferCompactSidebar}
-              narrowMode={preferCompactSidebar}
-              activeVoiceChannelId={shellLayout.activeVoiceChannelId}
-              activeTextChannelId={shellLayout.activeTextChannelId}
-              onToggleCollapsed={() =>
-                setShellLayout((current) => ({
-                  ...current,
-                  leftSidebarCollapsed: !current.leftSidebarCollapsed,
-                }))
-              }
-              onSelectVoiceChannel={(channelId) =>
-                setShellLayout((current) => ({
-                  ...current,
-                  activeVoiceChannelId: channelId,
-                }))
-              }
-              onSelectTextChannel={(channelId) =>
-                setShellLayout((current) => ({
-                  ...current,
-                  activeTextChannelId: channelId,
-                  rightPanelMode: "chat",
-                }))
-              }
-            />
+            <Paper
+              sx={{
+                p: 1,
+                height: "100%",
+                minHeight: 0,
+                display: "grid",
+                placeItems: "center",
+                color: "text.secondary",
+              }}
+            >
+              <Typography variant="caption">Sidebar moved to workspace shell.</Typography>
+            </Paper>
           )}
 
           <StreamStage
@@ -800,6 +791,15 @@ export function RoomShell(props: {
         onSetVoiceVolume={(identity, value) => media.setChannelVolume(identity, "voice", value)}
         onSetStreamVolume={(identity, value) => media.setChannelVolume(identity, "stream", value)}
         onResetAudio={media.resetParticipantAudio}
+        showLocalAudioControls
+        canModerate={false}
+        serverMuted={false}
+        serverDeafened={false}
+        participantRole={null}
+        onKick={() => undefined}
+        onSetServerMuted={() => undefined}
+        onSetServerDeafened={() => undefined}
+        onSetRole={() => undefined}
       />
 
       <ParticipantAudioMenu
@@ -811,6 +811,15 @@ export function RoomShell(props: {
         onSetVoiceVolume={(identity, value) => media.setChannelVolume(identity, "voice", value)}
         onSetStreamVolume={(identity, value) => media.setChannelVolume(identity, "stream", value)}
         onResetAudio={media.resetParticipantAudio}
+        showLocalAudioControls
+        canModerate={false}
+        serverMuted={false}
+        serverDeafened={false}
+        participantRole={null}
+        onKick={() => undefined}
+        onSetServerMuted={() => undefined}
+        onSetServerDeafened={() => undefined}
+        onSetRole={() => undefined}
       />
 
       {fullscreenTrack && (

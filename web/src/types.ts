@@ -118,6 +118,7 @@ export type VoiceConnectResponse = {
   liveKitRoomName: string;
   rtcToken: string;
   rtcUrl: string;
+  sessionInstanceId: string;
   maxParticipants: number | null;
   maxConcurrentStreams: number | null;
 };
@@ -144,4 +145,5 @@ export type JoinRoomResponse = {
   appToken: string;
   rtcToken: string;
   rtcUrl: string;
+  sessionInstanceId?: string;
 };

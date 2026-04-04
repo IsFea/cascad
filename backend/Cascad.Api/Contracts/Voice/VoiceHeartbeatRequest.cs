@@ -1,12 +1,8 @@
 namespace Cascad.Api.Contracts.Voice;
 
-public sealed class VoiceSelfStateRequest
+public sealed class VoiceHeartbeatRequest
 {
     public Guid ChannelId { get; set; }
 
     public string SessionInstanceId { get; set; } = string.Empty;
-
-    public bool IsMuted { get; set; }
-
-    public bool IsDeafened { get; set; }
 }

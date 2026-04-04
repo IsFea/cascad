@@ -2,6 +2,11 @@
 
 Self-hosted MVP voice platform on ASP.NET Core with multi-user screen sharing (Discord-like room behavior).
 
+## AI Onboarding
+
+For AI agents and quick project context, start here:
+- [`AI_CONTEXT.md`](./AI_CONTEXT.md)
+
 ## Stack
 
 - `backend`: ASP.NET Core 8 + EF Core + PostgreSQL + JWT

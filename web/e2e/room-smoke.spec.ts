@@ -77,3 +77,20 @@ test("room smoke: participants panel collapse and expand", async ({ page }) => {
     .click();
   await expect(page.getByRole("tab", { name: "Participants" })).toBeVisible();
 });
+
+test("room smoke: narrow viewport uses rail without page scroll", async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 700 });
+  await joinRoom(page);
+
+  await expect(page.getByRole("tab", { name: "Participants" })).toHaveCount(0);
+
+  const hasPageScroll = await page.evaluate(() => {
+    const root = document.scrollingElement;
+    if (!root) {
+      return false;
+    }
+    return root.scrollHeight > root.clientHeight + 1;
+  });
+
+  expect(hasPageScroll).toBeFalsy();
+});

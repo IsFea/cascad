@@ -27,6 +27,8 @@ export function StreamContextMenu(props: {
       open={Boolean(props.menu)}
       onClose={props.onClose}
       anchorReference="anchorPosition"
+      sx={{ zIndex: 1700 }}
+      slotProps={{ paper: { sx: { zIndex: 1701 } } }}
       anchorPosition={
         props.menu
           ? { top: props.menu.mouseY, left: props.menu.mouseX }

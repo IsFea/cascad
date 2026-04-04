@@ -297,6 +297,75 @@ export function computeGridPageSize(width: number, height: number): number {
   return columns * rows;
 }
 
+export function computeGridGeometry(
+  width: number,
+  height: number,
+  itemCount: number,
+): {
+  columns: number;
+  rows: number;
+  tileWidth: number;
+  tileHeight: number;
+} {
+  if (width <= 0 || height <= 0 || itemCount <= 0) {
+    return {
+      columns: 1,
+      rows: 1,
+      tileWidth: 320,
+      tileHeight: 180,
+    };
+  }
+
+  const gap = 10;
+  const minWidth = 220;
+  const minHeight = 124;
+  const maxTileWidth = 980;
+  const safeWidth = Math.max(320, width);
+  const safeHeight = Math.max(220, height);
+  const maxColumns = Math.max(1, Math.min(itemCount, 6));
+
+  let best = {
+    columns: 1,
+    rows: itemCount,
+    tileWidth: Math.min(maxTileWidth, safeWidth),
+    tileHeight: Math.min(safeHeight, Math.min(maxTileWidth, safeWidth) * (9 / 16)),
+    score: Number.NEGATIVE_INFINITY,
+  };
+
+  for (let columns = 1; columns <= maxColumns; columns += 1) {
+    const rows = Math.max(1, Math.ceil(itemCount / columns));
+    const widthByColumns = (safeWidth - (columns - 1) * gap) / columns;
+    const heightByRows = (safeHeight - (rows - 1) * gap) / rows;
+    const tileWidth = Math.min(widthByColumns, heightByRows * (16 / 9), maxTileWidth);
+    const tileHeight = tileWidth * (9 / 16);
+
+    if (tileWidth < minWidth || tileHeight < minHeight) {
+      continue;
+    }
+
+    const usedArea = tileWidth * tileHeight * itemCount;
+    const emptySlots = rows * columns - itemCount;
+    const score = usedArea - emptySlots * 50_000;
+
+    if (score > best.score) {
+      best = {
+        columns,
+        rows,
+        tileWidth,
+        tileHeight,
+        score,
+      };
+    }
+  }
+
+  return {
+    columns: best.columns,
+    rows: best.rows,
+    tileWidth: Math.floor(best.tileWidth),
+    tileHeight: Math.floor(best.tileHeight),
+  };
+}
+
 export function computeFilmstripPageSize(width: number): number {
   if (width <= 0) {
     return 1;

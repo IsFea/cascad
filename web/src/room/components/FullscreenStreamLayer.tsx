@@ -30,6 +30,9 @@ export function FullscreenStreamLayer(props: {
 
   return (
     <Box
+      onContextMenuCapture={(event) => {
+        event.preventDefault();
+      }}
       sx={{
         position: "fixed",
         inset: 0,
@@ -89,12 +92,12 @@ export function FullscreenStreamLayer(props: {
       <Paper
         sx={{
           position: "absolute",
-          right: 14,
+          right: 12,
           top: 62,
-          width: 66,
+          width: 54,
           maxHeight: "calc(100vh - 90px)",
           overflowY: "auto",
-          p: 0.6,
+          p: 0.45,
           bgcolor: "rgba(8, 16, 24, 0.52)",
           borderColor: "rgba(123, 176, 209, 0.28)",
           backdropFilter: "blur(12px)",
@@ -113,9 +116,9 @@ export function FullscreenStreamLayer(props: {
               >
                 <Avatar
                   sx={{
-                    width: 36,
-                    height: 36,
-                    fontSize: "0.78rem",
+                    width: 34,
+                    height: 34,
+                    fontSize: "0.72rem",
                     border: participant.isVoiceActive
                       ? "2px solid rgba(69, 214, 159, 0.95)"
                       : "2px solid rgba(121, 166, 205, 0.35)",
@@ -131,9 +134,9 @@ export function FullscreenStreamLayer(props: {
                   <FiberManualRecordIcon
                     sx={{
                       position: "absolute",
-                      right: -2,
-                      bottom: -2,
-                      fontSize: 10,
+                      right: -1,
+                      bottom: -1,
+                      fontSize: 9,
                       color: "#ff5252",
                       bgcolor: "#040a10",
                       borderRadius: "50%",

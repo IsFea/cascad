@@ -5,7 +5,6 @@ import {
   Button,
   Checkbox,
   Chip,
-  Container,
   Dialog,
   DialogActions,
   DialogContent,
@@ -26,6 +25,7 @@ import {
   Toolbar,
   Tooltip,
   Typography,
+  useMediaQuery,
 } from "@mui/material";
 import type { SelectChangeEvent } from "@mui/material/Select";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
@@ -50,8 +50,14 @@ import {
   StreamResolutionPreset,
 } from "../../roomState";
 import { JoinRoomResponse } from "../../types";
-import { ParticipantAudioMenuState, StreamContextMenuState } from "../types";
+import {
+  ParticipantAudioMenuState,
+  RightPanelMode,
+  RoomShellLayoutState,
+  StreamContextMenuState,
+} from "../types";
 import { useRoomMediaController } from "../useRoomMediaController";
+import { ChannelSidebar } from "./ChannelSidebar";
 import { FullscreenStreamLayer } from "./FullscreenStreamLayer";
 import { ParticipantAudioMenu } from "./ParticipantAudioMenu";
 import { ParticipantsPanel } from "./ParticipantsPanel";
@@ -72,13 +78,20 @@ export function RoomShell(props: {
   const [settingsAnchorEl, setSettingsAnchorEl] = useState<HTMLElement | null>(null);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
-  const [rightPanelTab, setRightPanelTab] = useState<"participants" | "chat">(
-    "participants",
-  );
   const [expandedParticipantControls, setExpandedParticipantControls] = useState<
     Record<string, boolean>
   >({});
   const [fullscreenStreamSid, setFullscreenStreamSid] = useState<string | null>(null);
+
+  const [shellLayout, setShellLayout] = useState<RoomShellLayoutState>({
+    leftSidebarCollapsed: false,
+    activeVoiceChannelId: "voice-main",
+    activeTextChannelId: "chat-general",
+    rightPanelMode: "participants",
+  });
+
+  const preferCompactSidebar = useMediaQuery("(max-width: 1380px)");
+  const preferRailPanel = useMediaQuery("(max-width: 1180px)");
 
   const selectedContextParticipant = useMemo(() => {
     if (!streamContextMenu) {
@@ -127,8 +140,71 @@ export function RoomShell(props: {
     };
   }, [fullscreenStreamSid]);
 
+  useEffect(() => {
+    if (!preferCompactSidebar) {
+      return;
+    }
+
+    setShellLayout((current) => {
+      if (current.leftSidebarCollapsed) {
+        return current;
+      }
+      return {
+        ...current,
+        leftSidebarCollapsed: true,
+      };
+    });
+  }, [preferCompactSidebar]);
+
+  useEffect(() => {
+    if (preferRailPanel) {
+      if (!rightPanelCollapsed) {
+        setRightPanelCollapsed(true);
+      }
+
+      setShellLayout((current) => {
+        if (current.rightPanelMode === "rail") {
+          return current;
+        }
+        return {
+          ...current,
+          rightPanelMode: "rail",
+        };
+      });
+      return;
+    }
+
+    setShellLayout((current) => {
+      if (current.rightPanelMode !== "rail") {
+        return current;
+      }
+      return {
+        ...current,
+        rightPanelMode: "participants",
+      };
+    });
+  }, [preferRailPanel, rightPanelCollapsed]);
+
   const isTheaterMode = media.layoutState.mode === "theater";
   const settingsOpen = Boolean(settingsAnchorEl);
+  const isRightPanelCollapsed = rightPanelCollapsed || preferRailPanel;
+  const rightPanelTab = shellLayout.rightPanelMode === "chat" ? "chat" : "participants";
+
+  const shellGridColumns = useMemo(() => {
+    if (isTheaterMode) {
+      return "minmax(0, 1fr)";
+    }
+
+    const leftColumn =
+      shellLayout.leftSidebarCollapsed || preferCompactSidebar ? "70px" : "248px";
+    const rightColumn = isRightPanelCollapsed ? "56px" : "minmax(232px, 20vw)";
+    return `${leftColumn} minmax(0, 1fr) ${rightColumn}`;
+  }, [
+    isRightPanelCollapsed,
+    isTheaterMode,
+    preferCompactSidebar,
+    shellLayout.leftSidebarCollapsed,
+  ]);
 
   const handleLayoutModeChange = (
     _event: MouseEvent<HTMLElement>,
@@ -162,24 +238,45 @@ export function RoomShell(props: {
     });
   };
 
+  const openParticipantAudioMenu = (
+    event: MouseEvent<HTMLElement>,
+    identity: string,
+    scope: ParticipantAudioMenuState["scope"],
+  ) => {
+    setParticipantAudioMenu({
+      identity,
+      mouseX: event.clientX + 2,
+      mouseY: event.clientY - 6,
+      scope,
+    });
+  };
+
+  const setRightPanelMode = (mode: RightPanelMode) => {
+    setShellLayout((current) => ({
+      ...current,
+      rightPanelMode: mode,
+    }));
+  };
+
   return (
-    <Box>
+    <Box sx={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <AppBar
         position="static"
         color="transparent"
         elevation={0}
         sx={{
-          borderBottom: "1px solid rgba(115, 158, 191, 0.2)",
+          borderBottom: "1px solid rgba(88, 100, 118, 0.36)",
           backdropFilter: "blur(10px)",
-          background:
-            "linear-gradient(110deg, rgba(9, 21, 32, 0.86), rgba(10, 36, 28, 0.64))",
+          background: "rgba(20, 24, 31, 0.86)",
         }}
       >
-        <Toolbar sx={{ gap: 1.2, flexWrap: "wrap" }}>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ flexGrow: 1 }}>
-            <MonitorIcon color="primary" />
-            <Box>
-              <Typography variant="h6">{props.session.room.name}</Typography>
+        <Toolbar sx={{ gap: 1, px: { xs: 1, md: 1.5 }, minHeight: { xs: 60, md: 64 } }}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flexGrow: 1 }}>
+            <MonitorIcon color="primary" fontSize="small" />
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="h6" noWrap>
+                {props.session.room.name}
+              </Typography>
               <Typography variant="caption" color="text.secondary">
                 {media.connected ? "Connected to voice" : "Connecting to room..."}
               </Typography>
@@ -191,6 +288,7 @@ export function RoomShell(props: {
             color={media.connected ? "secondary" : "default"}
             label={media.connected ? "Voice online" : "Voice offline"}
             variant={media.connected ? "filled" : "outlined"}
+            size="small"
           />
 
           <ToggleButtonGroup
@@ -200,7 +298,9 @@ export function RoomShell(props: {
             onChange={handleLayoutModeChange}
             sx={{
               ".MuiToggleButton-root": {
-                px: 1,
+                px: 0.9,
+                minWidth: 36,
+                height: 32,
               },
             }}
           >
@@ -221,23 +321,23 @@ export function RoomShell(props: {
             </ToggleButton>
           </ToggleButtonGroup>
 
-          {!isTheaterMode && (
+          {!isTheaterMode && !preferRailPanel && (
             <Tooltip
               title={
-                rightPanelCollapsed
+                isRightPanelCollapsed
                   ? "Open participants panel"
                   : "Collapse participants panel"
               }
             >
               <IconButton
                 aria-label={
-                  rightPanelCollapsed
+                  isRightPanelCollapsed
                     ? "Open participants panel"
                     : "Collapse participants panel"
                 }
-                color={rightPanelCollapsed ? "primary" : "default"}
+                color={isRightPanelCollapsed ? "primary" : "default"}
                 onClick={() => {
-                  setRightPanelTab("participants");
+                  setRightPanelMode("participants");
                   setRightPanelCollapsed((current) => !current);
                 }}
               >
@@ -277,6 +377,7 @@ export function RoomShell(props: {
             startIcon={media.sharing ? <StopScreenShareIcon /> : <ScreenShareIcon />}
             color={media.sharing ? "error" : "primary"}
             variant={media.sharing ? "outlined" : "contained"}
+            size="small"
           >
             {media.sharing ? "Stop Share" : "Share Screen"}
           </Button>
@@ -286,6 +387,7 @@ export function RoomShell(props: {
             startIcon={<LogoutIcon />}
             color="inherit"
             variant="outlined"
+            size="small"
           >
             Leave
           </Button>
@@ -523,11 +625,11 @@ export function RoomShell(props: {
         </Box>
       </Popover>
 
-      <Container maxWidth={false} sx={{ py: 2 }}>
+      <Box sx={{ p: 1.2, flex: 1, minHeight: 0, overflow: "hidden" }}>
         {media.error && (
           <Alert
             severity="error"
-            sx={{ mb: 2 }}
+            sx={{ mb: 1.2 }}
             onClose={() => {
               media.setError(null);
             }}
@@ -538,19 +640,42 @@ export function RoomShell(props: {
 
         <Box
           sx={{
+            height: "100%",
+            minHeight: 0,
             display: "grid",
-            gridTemplateColumns: {
-              xs: "1fr",
-              lg: isTheaterMode
-                ? "1fr"
-                : rightPanelCollapsed
-                  ? "minmax(0, 1fr) 56px"
-                  : "minmax(0, 1fr) 304px",
-            },
-            gap: 1.6,
-            alignItems: "start",
+            gridTemplateColumns: shellGridColumns,
+            gap: 1.2,
+            alignItems: "stretch",
           }}
         >
+          {!isTheaterMode && (
+            <ChannelSidebar
+              collapsed={shellLayout.leftSidebarCollapsed || preferCompactSidebar}
+              narrowMode={preferCompactSidebar}
+              activeVoiceChannelId={shellLayout.activeVoiceChannelId}
+              activeTextChannelId={shellLayout.activeTextChannelId}
+              onToggleCollapsed={() =>
+                setShellLayout((current) => ({
+                  ...current,
+                  leftSidebarCollapsed: !current.leftSidebarCollapsed,
+                }))
+              }
+              onSelectVoiceChannel={(channelId) =>
+                setShellLayout((current) => ({
+                  ...current,
+                  activeVoiceChannelId: channelId,
+                }))
+              }
+              onSelectTextChannel={(channelId) =>
+                setShellLayout((current) => ({
+                  ...current,
+                  activeTextChannelId: channelId,
+                  rightPanelMode: "chat",
+                }))
+              }
+            />
+          )}
+
           <StreamStage
             participantMap={media.participantMap}
             visibleScreenTracks={media.visibleScreenTracks}
@@ -574,6 +699,7 @@ export function RoomShell(props: {
                 identity: track.participantIdentity,
                 mouseX: event.clientX + 2,
                 mouseY: event.clientY - 6,
+                scope: "stream",
               });
             }}
           />
@@ -582,19 +708,25 @@ export function RoomShell(props: {
             <ParticipantsPanel
               participants={media.participants}
               remoteParticipantsCount={media.remoteParticipantsCount}
-              collapsed={rightPanelCollapsed}
+              collapsed={isRightPanelCollapsed}
+              narrowMode={preferRailPanel}
               tab={rightPanelTab}
               expandedRows={expandedParticipantControls}
-              onTabChange={setRightPanelTab}
-              onSetCollapsed={setRightPanelCollapsed}
+              onTabChange={(value) => setRightPanelMode(value)}
+              onSetCollapsed={(value) => {
+                if (!preferRailPanel) {
+                  setRightPanelCollapsed(value);
+                }
+              }}
               onToggleRow={toggleParticipantRow}
               onSetChannelVolume={media.setChannelVolume}
               onSetChannelMuted={media.setChannelMuted}
               onResetParticipantAudio={media.resetParticipantAudio}
+              onOpenParticipantMenu={openParticipantAudioMenu}
             />
           )}
         </Box>
-      </Container>
+      </Box>
 
       <StreamContextMenu
         menu={streamContextMenu}
@@ -647,12 +779,7 @@ export function RoomShell(props: {
           onAvatarContextMenu={(event, identity) => {
             event.preventDefault();
             event.stopPropagation();
-            setParticipantAudioMenu({
-              identity,
-              mouseX: event.clientX + 2,
-              mouseY: event.clientY - 6,
-              scope: "fullscreen",
-            });
+            openParticipantAudioMenu(event, identity, "fullscreen-avatar");
           }}
         />
       )}

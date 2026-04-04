@@ -24,13 +24,23 @@ export type StreamContextMenuState = {
   identity: string;
   mouseX: number;
   mouseY: number;
+  scope: "stream";
 };
 
 export type ParticipantAudioMenuState = {
   identity: string;
   mouseX: number;
   mouseY: number;
-  scope: "normal" | "fullscreen";
+  scope: "normal" | "fullscreen-avatar" | "participant-rail";
+};
+
+export type RightPanelMode = "participants" | "chat" | "rail";
+
+export type RoomShellLayoutState = {
+  leftSidebarCollapsed: boolean;
+  activeVoiceChannelId: string;
+  activeTextChannelId: string;
+  rightPanelMode: RightPanelMode;
 };
 
 export type AudioAnalyserHandle = {

@@ -3,6 +3,7 @@ import { Box, Chip, Paper, Stack, Typography } from "@mui/material";
 import { MouseEvent, useEffect, useMemo, useState } from "react";
 import {
   computeFilmstripPageSize,
+  computeGridGeometry,
   computeGridPageSize,
   paginateItems,
   shouldCenterFilmstrip,
@@ -39,15 +40,10 @@ export function StreamStage(props: {
 
   const gridPageSize = useMemo(() => {
     return computeGridPageSize(
-      gridViewportSize.width,
-      gridViewportSize.height > 0 ? gridViewportSize.height : 520,
+      gridViewportSize.width > 0 ? gridViewportSize.width : 960,
+      gridViewportSize.height > 0 ? gridViewportSize.height : 560,
     );
   }, [gridViewportSize.height, gridViewportSize.width]);
-
-  const gridColumns = useMemo(() => {
-    const width = gridViewportSize.width > 0 ? gridViewportSize.width : 960;
-    return Math.max(1, Math.floor(width / 280));
-  }, [gridViewportSize.width]);
 
   const gridPagination = useMemo(() => {
     return paginateItems(props.visibleScreenTracks, gridPage, gridPageSize);
@@ -58,6 +54,14 @@ export function StreamStage(props: {
       setGridPage(gridPagination.currentPage);
     }
   }, [gridPage, gridPagination.currentPage]);
+
+  const gridGeometry = useMemo(() => {
+    return computeGridGeometry(
+      gridViewportSize.width > 0 ? gridViewportSize.width : 960,
+      gridViewportSize.height > 0 ? gridViewportSize.height : 560,
+      gridPagination.items.length,
+    );
+  }, [gridPagination.items.length, gridViewportSize.height, gridViewportSize.width]);
 
   const focusStripPageSize = useMemo(() => {
     return computeFilmstripPageSize(focusStripSize.width > 0 ? focusStripSize.width : 960);
@@ -81,6 +85,10 @@ export function StreamStage(props: {
     return clampNumber(Math.floor(raw), 132, 220);
   }, [focusStripPagination.items.length, focusStripSize.width]);
 
+  const suppressNativeMenu = (event: MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+  };
+
   const renderStreamTile = (item: ScreenTrackState, options?: { compact?: boolean }) => {
     const participant = props.participantMap.get(item.participantIdentity);
     const label = participant?.displayName ?? item.participantIdentity;
@@ -103,13 +111,23 @@ export function StreamStage(props: {
   };
 
   return (
-    <Paper sx={{ p: 2 }} onContextMenuCapture={suppressStreamNativeMenu}>
+    <Paper
+      sx={{
+        p: 1.3,
+        height: "100%",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+      onContextMenuCapture={suppressNativeMenu}
+    >
       <Stack
         direction={{ xs: "column", sm: "row" }}
         spacing={1}
         justifyContent="space-between"
         alignItems={{ xs: "flex-start", sm: "center" }}
-        sx={{ mb: 1.5 }}
+        sx={{ mb: 1.1, flexShrink: 0 }}
       >
         <Stack direction="row" spacing={1} alignItems="center">
           <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
@@ -137,7 +155,13 @@ export function StreamStage(props: {
       </Stack>
 
       {props.hiddenStreamIdentities.length > 0 && (
-        <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
+        <Stack
+          direction="row"
+          spacing={0.8}
+          flexWrap="wrap"
+          useFlexGap
+          sx={{ mb: 1.1, flexShrink: 0 }}
+        >
           <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center" }}>
             Hidden streams:
           </Typography>
@@ -157,116 +181,124 @@ export function StreamStage(props: {
         </Stack>
       )}
 
-      {props.visibleScreenTracks.length === 0 && (
-        <Paper
-          variant="outlined"
-          sx={{
-            borderStyle: "dashed",
-            p: 3,
-            textAlign: "center",
-            bgcolor: alpha("#57c2ff", 0.08),
-          }}
-        >
-          <Typography variant="body1" sx={{ mb: 0.5 }}>
-            No visible streams right now.
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Start sharing or restore hidden streams from chips above.
-          </Typography>
-        </Paper>
-      )}
+      <Box sx={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        {props.visibleScreenTracks.length === 0 && (
+          <Paper
+            variant="outlined"
+            sx={{
+              borderStyle: "dashed",
+              p: 3,
+              textAlign: "center",
+              bgcolor: alpha("#57c2ff", 0.08),
+              height: "100%",
+              minHeight: 0,
+              display: "grid",
+              placeItems: "center",
+            }}
+          >
+            <Box>
+              <Typography variant="body1" sx={{ mb: 0.5 }}>
+                No visible streams right now.
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Start sharing or restore hidden streams from chips above.
+              </Typography>
+            </Box>
+          </Paper>
+        )}
 
-      {props.visibleScreenTracks.length > 0 && props.effectiveStreamMode === "grid" && (
-        <Box
-          ref={gridViewportRef}
-          sx={{
-            minHeight: 330,
-            height: { xs: "auto", md: "calc(100vh - 320px)" },
-            maxHeight: "calc(100vh - 250px)",
-            overflow: "hidden",
-            display: "grid",
-            gridTemplateColumns: `repeat(${Math.min(
-              Math.max(1, gridPagination.items.length),
-              gridColumns,
-            )}, minmax(0, 1fr))`,
-            gap: 1.2,
-            alignContent: "start",
-          }}
-        >
-          {gridPagination.items.map((item) => renderStreamTile(item))}
-        </Box>
-      )}
-
-      {props.visibleScreenTracks.length > 0 && props.effectiveStreamMode === "grid" && (
-        <PaginationControls
-          page={gridPagination.currentPage}
-          totalPages={gridPagination.totalPages}
-          onPrev={() => setGridPage((current) => current - 1)}
-          onNext={() => setGridPage((current) => current + 1)}
-        />
-      )}
-
-      {props.visibleScreenTracks.length > 0 && props.effectiveStreamMode === "focus" && (
-        <Stack spacing={1}>
-          {props.focusedScreenTrack && (
+        {props.visibleScreenTracks.length > 0 && props.effectiveStreamMode === "grid" && (
+          <>
             <Box
+              ref={gridViewportRef}
               sx={{
-                maxHeight: { xs: "52vh", md: "calc(100vh - 365px)" },
+                flex: 1,
+                minHeight: 0,
                 overflow: "hidden",
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 1.1,
+                alignContent: "center",
+                justifyContent: "center",
+                py: 0.4,
               }}
             >
-              {renderStreamTile(props.focusedScreenTrack)}
+              {gridPagination.items.map((item) => (
+                <Box
+                  key={item.sid}
+                  sx={{
+                    width: gridGeometry.tileWidth,
+                    maxWidth: "100%",
+                    flex: `0 0 ${gridGeometry.tileWidth}px`,
+                  }}
+                >
+                  {renderStreamTile(item)}
+                </Box>
+              ))}
             </Box>
-          )}
 
-          {props.secondaryFocusTracks.length > 0 && (
-            <Box>
-              <Box
-                ref={focusStripRef}
-                sx={{
-                  display: "flex",
-                  gap: 1,
-                  justifyContent: shouldCenterFilmstrip(
-                    focusStripPagination.items.length,
-                    focusStripPageSize,
-                  )
-                    ? "center"
-                    : "flex-start",
-                  alignItems: "start",
-                  minHeight: 92,
-                  maxHeight: 116,
-                  overflow: "hidden",
-                }}
-              >
-                {focusStripPagination.items.map((item) => (
-                  <Box
-                    key={item.sid}
-                    sx={{
-                      width: focusTileWidth,
-                      flex: `0 0 ${focusTileWidth}px`,
-                      maxWidth: focusTileWidth,
-                    }}
-                  >
-                    {renderStreamTile(item, { compact: true })}
-                  </Box>
-                ))}
+            <PaginationControls
+              page={gridPagination.currentPage}
+              totalPages={gridPagination.totalPages}
+              onPrev={() => setGridPage((current) => current - 1)}
+              onNext={() => setGridPage((current) => current + 1)}
+            />
+          </>
+        )}
+
+        {props.visibleScreenTracks.length > 0 && props.effectiveStreamMode === "focus" && (
+          <Stack spacing={1} sx={{ flex: 1, minHeight: 0 }}>
+            {props.focusedScreenTrack && (
+              <Box sx={{ flex: 1, minHeight: 0, display: "grid", alignItems: "center" }}>
+                {renderStreamTile(props.focusedScreenTrack)}
               </Box>
+            )}
 
-              <PaginationControls
-                compact
-                page={focusStripPagination.currentPage}
-                totalPages={focusStripPagination.totalPages}
-                onPrev={() => setFocusStripPage((current) => current - 1)}
-                onNext={() => setFocusStripPage((current) => current + 1)}
-              />
-            </Box>
-          )}
-        </Stack>
-      )}
+            {props.secondaryFocusTracks.length > 0 && (
+              <Box sx={{ flexShrink: 0 }}>
+                <Box
+                  ref={focusStripRef}
+                  sx={{
+                    display: "flex",
+                    gap: 1,
+                    justifyContent: shouldCenterFilmstrip(
+                      focusStripPagination.items.length,
+                      focusStripPageSize,
+                    )
+                      ? "center"
+                      : "flex-start",
+                    alignItems: "start",
+                    minHeight: 92,
+                    maxHeight: 116,
+                    overflow: "hidden",
+                  }}
+                >
+                  {focusStripPagination.items.map((item) => (
+                    <Box
+                      key={item.sid}
+                      sx={{
+                        width: focusTileWidth,
+                        flex: `0 0 ${focusTileWidth}px`,
+                        maxWidth: focusTileWidth,
+                      }}
+                    >
+                      {renderStreamTile(item, { compact: true })}
+                    </Box>
+                  ))}
+                </Box>
+
+                <PaginationControls
+                  compact
+                  page={focusStripPagination.currentPage}
+                  totalPages={focusStripPagination.totalPages}
+                  onPrev={() => setFocusStripPage((current) => current - 1)}
+                  onNext={() => setFocusStripPage((current) => current + 1)}
+                />
+              </Box>
+            )}
+          </Stack>
+        )}
+      </Box>
     </Paper>
   );
 }
-  const suppressStreamNativeMenu = (event: MouseEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-  };

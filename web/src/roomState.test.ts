@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Track } from "livekit-client";
 import {
   buildMicTrackOptions,
+  computeGridGeometry,
   buildScreenShareConfig,
   computeFilmstripPageSize,
   computeGridPageSize,
@@ -104,6 +105,17 @@ describe("roomState:pagination", () => {
   it("computes adaptive page sizes", () => {
     expect(computeGridPageSize(1200, 600)).toBeGreaterThan(1);
     expect(computeFilmstripPageSize(980)).toBeGreaterThan(1);
+  });
+
+  it("computes larger grid tiles for low stream counts on wide viewport", () => {
+    const one = computeGridGeometry(1900, 900, 1);
+    const two = computeGridGeometry(1900, 900, 2);
+    const three = computeGridGeometry(1900, 900, 3);
+
+    expect(one.tileWidth).toBeGreaterThanOrEqual(900);
+    expect(two.tileWidth).toBeGreaterThanOrEqual(760);
+    expect(three.tileWidth).toBeGreaterThanOrEqual(560);
+    expect(three.columns).toBeGreaterThanOrEqual(2);
   });
 
   it("paginates and clamps page", () => {

@@ -31,19 +31,19 @@ export function ScreenTile(props: {
     };
   }, [props.track]);
 
-  const suppressNativeMenu = (event: MouseEvent<HTMLElement>) => {
+  const suppressNativeMenuOnly = (event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
-    event.stopPropagation();
   };
 
   return (
     <Paper
       onClick={props.onClick}
       onContextMenu={(event) => {
-        suppressNativeMenu(event);
+        event.preventDefault();
+        event.stopPropagation();
         props.onContextMenu(event);
       }}
-      onContextMenuCapture={suppressNativeMenu}
+      onContextMenuCapture={suppressNativeMenuOnly}
       sx={{
         position: "relative",
         overflow: "hidden",
@@ -51,12 +51,12 @@ export function ScreenTile(props: {
         border: props.isScreenAudioActive
           ? "1px solid rgba(69, 214, 159, 0.98)"
           : props.isFocused
-            ? "1px solid rgba(87, 194, 255, 0.95)"
-            : "1px solid rgba(112, 150, 180, 0.45)",
+            ? "1px solid rgba(120, 189, 255, 0.8)"
+            : "1px solid rgba(96, 118, 145, 0.4)",
         boxShadow: props.isScreenAudioActive
           ? "0 0 0 2px rgba(69, 214, 159, 0.34)"
           : props.isFocused
-            ? "0 0 0 2px rgba(87, 194, 255, 0.24)"
+            ? "0 0 0 2px rgba(120, 189, 255, 0.22)"
             : "none",
         transition: "border-color 180ms ease, box-shadow 180ms ease",
         "&:hover .tile-actions": {
@@ -69,7 +69,7 @@ export function ScreenTile(props: {
         ref={videoRef}
         autoPlay
         playsInline
-        onContextMenuCapture={suppressNativeMenu}
+        onContextMenuCapture={suppressNativeMenuOnly}
         sx={{
           width: "100%",
           aspectRatio: "16 / 9",

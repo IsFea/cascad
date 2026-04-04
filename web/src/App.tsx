@@ -36,22 +36,22 @@ const theme = createTheme({
   palette: {
     mode: "dark",
     primary: {
-      main: "#57c2ff",
-      light: "#a6e6ff",
+      main: "#6ea4ff",
+      light: "#97bdff",
     },
     secondary: {
-      main: "#46de9f",
+      main: "#4ed59c",
     },
     background: {
-      default: "#040a10",
-      paper: "#0f1a26",
+      default: "#0f1116",
+      paper: "#1a1f29",
     },
     error: {
-      main: "#ff7272",
+      main: "#f16d7f",
     },
   },
   shape: {
-    borderRadius: 14,
+    borderRadius: 12,
   },
   typography: {
     fontFamily: '"IBM Plex Sans", "Segoe UI", sans-serif',
@@ -68,10 +68,8 @@ const theme = createTheme({
       styleOverrides: {
         root: {
           backgroundImage: "none",
-          border: "1px solid rgba(121, 166, 205, 0.22)",
-          backdropFilter: "blur(10px)",
-          transition:
-            "border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease",
+          border: "1px solid rgba(86, 95, 110, 0.45)",
+          transition: "border-color 180ms ease, box-shadow 180ms ease",
         },
       },
     },
@@ -80,34 +78,11 @@ const theme = createTheme({
         root: {
           textTransform: "none",
           fontWeight: 600,
-          transition: "transform 140ms ease, box-shadow 180ms ease",
+          borderRadius: 10,
+          transition: "background-color 140ms ease, border-color 140ms ease",
         },
         contained: {
-          boxShadow: "0 10px 28px rgba(3, 11, 20, 0.42)",
-          "&:hover": {
-            boxShadow: "0 12px 34px rgba(3, 11, 20, 0.5)",
-            transform: "translateY(-1px)",
-          },
-        },
-      },
-    },
-    MuiIconButton: {
-      styleOverrides: {
-        root: {
-          transition: "transform 140ms ease, background-color 180ms ease",
-          "&:hover": {
-            transform: "translateY(-1px)",
-          },
-        },
-      },
-    },
-    MuiToggleButton: {
-      styleOverrides: {
-        root: {
-          transition: "transform 140ms ease, background-color 180ms ease",
-          "&:hover": {
-            transform: "translateY(-1px)",
-          },
+          boxShadow: "0 8px 20px rgba(4, 8, 12, 0.34)",
         },
       },
     },
@@ -259,7 +234,8 @@ function App() {
           body: {
             minHeight: "100vh",
             background:
-              "radial-gradient(circle at 20% 20%, rgba(62, 124, 180, 0.25), transparent 40%), radial-gradient(circle at 80% 0%, rgba(69, 214, 159, 0.18), transparent 35%), #040a10",
+              "radial-gradient(circle at 18% 12%, rgba(66, 103, 164, 0.17), transparent 42%), radial-gradient(circle at 82% 0%, rgba(80, 129, 117, 0.14), transparent 32%), #0f1116",
+            overflow: "hidden",
           },
           "*": {
             boxSizing: "border-box",

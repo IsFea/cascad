@@ -64,6 +64,8 @@ import { ParticipantsPanel } from "./ParticipantsPanel";
 import { StreamContextMenu } from "./StreamContextMenu";
 import { StreamStage } from "./StreamStage";
 
+const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
+
 export function RoomShell(props: {
   session: JoinRoomResponse;
   onLeave: () => void;
@@ -219,8 +221,49 @@ export function RoomShell(props: {
   const handleShareButtonClick = async () => {
     if (media.sharing) {
       await media.stopScreenShare();
+      await fetch(`${API_BASE}/voice/streams/release`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${props.session.appToken}`,
+        },
+        body: JSON.stringify({
+          channelId: props.session.room.id,
+        }),
+      }).catch(() => undefined);
       return;
     }
+
+    try {
+      const permitResponse = await fetch(`${API_BASE}/voice/streams/permit`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${props.session.appToken}`,
+        },
+        body: JSON.stringify({
+          channelId: props.session.room.id,
+        }),
+      });
+
+      if (!permitResponse.ok) {
+        media.setError("Unable to get stream permit.");
+        return;
+      }
+
+      const permit = (await permitResponse.json()) as {
+        allowed: boolean;
+        reason?: string;
+      };
+      if (!permit.allowed) {
+        media.setError(permit.reason ?? "Stream limit reached in this voice channel.");
+        return;
+      }
+    } catch {
+      media.setError("Unable to get stream permit.");
+      return;
+    }
+
     setShareDialogOpen(true);
   };
 

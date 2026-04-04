@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using Cascad.Api.Data.Entities;
 using Cascad.Api.Options;
 using Cascad.Api.Services;
@@ -22,8 +23,10 @@ public sealed class AppJwtTokenServiceTests
         var user = new AppUser
         {
             Id = Guid.NewGuid(),
-            Nickname = "alice",
-            NormalizedNickname = "ALICE"
+            Username = "alice",
+            NormalizedUsername = "ALICE",
+            Status = UserApprovalStatus.Approved,
+            PlatformRole = PlatformRole.Admin
         };
 
         var result = service.GenerateToken(user);
@@ -31,7 +34,9 @@ public sealed class AppJwtTokenServiceTests
 
         Assert.Equal("issuer-test", parsed.Issuer);
         Assert.Contains(parsed.Audiences, x => x == "audience-test");
-        Assert.Contains(parsed.Claims, x => x.Type == "nickname" && x.Value == "alice");
+        Assert.Contains(parsed.Claims, x => x.Type == "username" && x.Value == "alice");
+        Assert.Contains(parsed.Claims, x => x.Type == "status" && x.Value == "Approved");
+        Assert.Contains(parsed.Claims, x => x.Type == ClaimTypes.Role && x.Value == "Admin");
         Assert.Contains(parsed.Claims, x => x.Type == "sub" && x.Value == user.Id.ToString());
         Assert.True(result.ExpiresAtUtc > DateTime.UtcNow);
     }

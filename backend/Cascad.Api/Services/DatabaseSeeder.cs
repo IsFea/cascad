@@ -1,6 +1,7 @@
 using Cascad.Api.Data;
 using Cascad.Api.Data.Entities;
 using Cascad.Api.Options;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -9,129 +10,136 @@ namespace Cascad.Api.Services;
 public sealed class DatabaseSeeder : IDatabaseSeeder
 {
     private readonly AppDbContext _db;
-    private readonly IInviteTokenService _inviteTokenService;
     private readonly SeedOptions _options;
+    private readonly IPasswordHasher<AppUser> _passwordHasher;
     private readonly ILogger<DatabaseSeeder> _logger;
 
     public DatabaseSeeder(
         AppDbContext db,
-        IInviteTokenService inviteTokenService,
         IOptions<SeedOptions> options,
+        IPasswordHasher<AppUser> passwordHasher,
         ILogger<DatabaseSeeder> logger)
     {
         _db = db;
-        _inviteTokenService = inviteTokenService;
         _options = options.Value;
+        _passwordHasher = passwordHasher;
         _logger = logger;
     }
 
     public async Task SeedAsync(CancellationToken cancellationToken = default)
     {
-        if (!_options.Enabled || !_options.CreateDemoRoom)
+        if (!_options.Enabled)
         {
             return;
         }
 
-        var ownerNickname = (_options.DemoOwnerNickname ?? "host").Trim();
-        var roomName = (_options.DemoRoomName ?? "Lobby").Trim();
-
-        if (string.IsNullOrWhiteSpace(ownerNickname) || string.IsNullOrWhiteSpace(roomName))
-        {
-            _logger.LogWarning("Skipping DB seed because DemoOwnerNickname or DemoRoomName is empty.");
-            return;
-        }
-
-        var normalizedNickname = ownerNickname.ToUpperInvariant();
         var now = DateTime.UtcNow;
+        var adminUsername = (_options.AdminUsername ?? string.Empty).Trim();
+        var adminPassword = (_options.AdminPassword ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(adminUsername) || string.IsNullOrWhiteSpace(adminPassword))
+        {
+            _logger.LogWarning("Seed skipped: Seed:AdminUsername or Seed:AdminPassword is empty.");
+            return;
+        }
 
-        var owner = await _db.Users.SingleOrDefaultAsync(
-            x => x.NormalizedNickname == normalizedNickname,
+        var normalizedAdminUsername = adminUsername.ToUpperInvariant();
+        var admin = await _db.Users.SingleOrDefaultAsync(
+            x => x.NormalizedUsername == normalizedAdminUsername,
             cancellationToken);
 
-        if (owner is null)
+        if (admin is null)
         {
-            owner = new AppUser
+            admin = new AppUser
             {
-                Nickname = ownerNickname,
-                NormalizedNickname = normalizedNickname,
+                Username = adminUsername,
+                NormalizedUsername = normalizedAdminUsername,
+                Status = UserApprovalStatus.Approved,
+                PlatformRole = PlatformRole.Admin,
                 CreatedAtUtc = now
             };
-            _db.Users.Add(owner);
+            admin.PasswordHash = _passwordHasher.HashPassword(admin, adminPassword);
+            _db.Users.Add(admin);
+            await _db.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("Seeded admin user: {Username}", adminUsername);
+        }
+
+        if (admin.Status != UserApprovalStatus.Approved || admin.PlatformRole != PlatformRole.Admin)
+        {
+            admin.Status = UserApprovalStatus.Approved;
+            admin.PlatformRole = PlatformRole.Admin;
             await _db.SaveChangesAsync(cancellationToken);
         }
 
-        var room = await _db.Rooms.SingleOrDefaultAsync(
-            x => x.OwnerUserId == owner.Id && x.Name == roomName,
+        var workspaceName = (_options.WorkspaceName ?? "Cascad Workspace").Trim();
+        var workspace = await _db.Workspaces.SingleOrDefaultAsync(
+            x => x.Name == workspaceName,
             cancellationToken);
 
-        if (room is null)
+        if (workspace is null)
         {
-            room = new Room
+            workspace = new Workspace
             {
-                Name = roomName,
-                OwnerUserId = owner.Id,
-                LiveKitRoomName = $"room-{Guid.NewGuid():N}",
+                Name = workspaceName,
                 CreatedAtUtc = now
             };
+            _db.Workspaces.Add(workspace);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
-            _db.Rooms.Add(room);
-            _db.RoomPresences.Add(new RoomPresence
+        var isMember = await _db.WorkspaceMembers.AnyAsync(
+            x => x.WorkspaceId == workspace.Id && x.UserId == admin.Id,
+            cancellationToken);
+
+        if (!isMember)
+        {
+            _db.WorkspaceMembers.Add(new WorkspaceMember
             {
-                RoomId = room.Id,
-                UserId = owner.Id,
-                JoinedAtUtc = now,
-                LastSeenAtUtc = now
+                WorkspaceId = workspace.Id,
+                UserId = admin.Id,
+                Role = PlatformRole.Admin,
+                JoinedAtUtc = now
             });
             await _db.SaveChangesAsync(cancellationToken);
         }
 
-        var hasActiveInvite = await _db.RoomInvites.AnyAsync(
-            x => x.RoomId == room.Id && !x.IsRevoked && x.ExpiresAtUtc > now,
+        var voiceChannelName = (_options.DefaultVoiceChannelName ?? "General voice").Trim();
+        var textChannelName = (_options.DefaultTextChannelName ?? "general").Trim();
+
+        var hasVoice = await _db.Channels.AnyAsync(
+            x => x.WorkspaceId == workspace.Id && x.Type == ChannelType.Voice && !x.IsDeleted,
             cancellationToken);
-
-        if (hasActiveInvite)
+        if (!hasVoice)
         {
-            return;
+            _db.Channels.Add(new Channel
+            {
+                WorkspaceId = workspace.Id,
+                Name = voiceChannelName,
+                Type = ChannelType.Voice,
+                Position = 1,
+                CreatedByUserId = admin.Id,
+                MaxParticipants = 12,
+                MaxConcurrentStreams = 4,
+                LiveKitRoomName = $"voice-{workspace.Id:N}-1",
+                CreatedAtUtc = now
+            });
         }
 
-        var configuredInviteToken = _options.DemoInviteToken?.Trim();
-        var rawToken = string.IsNullOrWhiteSpace(configuredInviteToken)
-            ? _inviteTokenService.CreateRawToken()
-            : configuredInviteToken;
-
-        var tokenHash = _inviteTokenService.ComputeHash(rawToken);
-        var hashTaken = await _db.RoomInvites.AnyAsync(x => x.TokenHash == tokenHash, cancellationToken);
-        if (hashTaken && !string.IsNullOrWhiteSpace(configuredInviteToken))
+        var hasText = await _db.Channels.AnyAsync(
+            x => x.WorkspaceId == workspace.Id && x.Type == ChannelType.Text && !x.IsDeleted,
+            cancellationToken);
+        if (!hasText)
         {
-            _logger.LogWarning("Configured DemoInviteToken already exists. Skipping invite seed.");
-            return;
+            _db.Channels.Add(new Channel
+            {
+                WorkspaceId = workspace.Id,
+                Name = textChannelName,
+                Type = ChannelType.Text,
+                Position = 1,
+                CreatedByUserId = admin.Id,
+                CreatedAtUtc = now
+            });
         }
 
-        while (hashTaken)
-        {
-            rawToken = _inviteTokenService.CreateRawToken();
-            tokenHash = _inviteTokenService.ComputeHash(rawToken);
-            hashTaken = await _db.RoomInvites.AnyAsync(x => x.TokenHash == tokenHash, cancellationToken);
-        }
-
-        var expiresHours = Math.Max(1, _options.DemoInviteExpiresHours);
-        var invite = new RoomInvite
-        {
-            RoomId = room.Id,
-            CreatedByUserId = owner.Id,
-            TokenHash = tokenHash,
-            CreatedAtUtc = now,
-            ExpiresAtUtc = now.AddHours(expiresHours),
-            IsRevoked = false
-        };
-
-        _db.RoomInvites.Add(invite);
         await _db.SaveChangesAsync(cancellationToken);
-
-        _logger.LogInformation(
-            "Seed ready: room '{RoomName}' for '{OwnerNickname}'. Invite token: {InviteToken}",
-            room.Name,
-            owner.Nickname,
-            rawToken);
     }
 }

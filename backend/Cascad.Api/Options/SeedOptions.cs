@@ -6,13 +6,13 @@ public sealed class SeedOptions
 
     public bool Enabled { get; set; } = true;
 
-    public bool CreateDemoRoom { get; set; } = true;
+    public string AdminUsername { get; set; } = "admin";
 
-    public string DemoOwnerNickname { get; set; } = "host";
+    public string AdminPassword { get; set; } = "admin12345";
 
-    public string DemoRoomName { get; set; } = "Lobby";
+    public string WorkspaceName { get; set; } = "Cascad Workspace";
 
-    public string? DemoInviteToken { get; set; }
+    public string DefaultVoiceChannelName { get; set; } = "General voice";
 
-    public int DemoInviteExpiresHours { get; set; } = 720;
+    public string DefaultTextChannelName { get; set; } = "general";
 }

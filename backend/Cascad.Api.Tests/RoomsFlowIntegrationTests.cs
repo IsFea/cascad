@@ -1,17 +1,24 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.IdentityModel.Tokens.Jwt;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Cascad.Api.Contracts.Admin;
 using Cascad.Api.Contracts.Auth;
-using Cascad.Api.Contracts.Rooms;
-using Cascad.Api.Data;
-using Cascad.Api.Services;
-using Microsoft.Extensions.DependencyInjection;
+using Cascad.Api.Contracts.Voice;
+using Cascad.Api.Contracts.Workspace;
 
 namespace Cascad.Api.Tests;
 
 public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
     private readonly TestWebAppFactory _factory;
 
     public RoomsFlowIntegrationTests(TestWebAppFactory factory)
@@ -20,92 +27,138 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
-    public async Task GuestJoinFlow_ShouldIssueRtcToken()
+    public async Task RegisterApprovalAndVoiceConnectFlow_ShouldWork()
     {
         var client = _factory.CreateClient();
-        var authToken = await AuthenticateAsync(client, "alice");
 
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", authToken);
+        var registerResponse = await client.PostAsJsonAsync(
+            "/api/auth/register",
+            new RegisterRequest
+            {
+                Username = "alice",
+                Password = "alice12345",
+                ConfirmPassword = "alice12345"
+            });
+        Assert.Equal(HttpStatusCode.Created, registerResponse.StatusCode);
 
-        var createRoomResponse = await client.PostAsJsonAsync(
-            "/api/rooms",
-            new CreateRoomRequest { Name = "Raid Room" });
-        createRoomResponse.EnsureSuccessStatusCode();
-        var room = await createRoomResponse.Content.ReadFromJsonAsync<RoomDto>();
-        Assert.NotNull(room);
+        var blockedLoginResponse = await client.PostAsJsonAsync(
+            "/api/auth/login",
+            new LoginRequest
+            {
+                Username = "alice",
+                Password = "alice12345"
+            });
+        Assert.Equal(HttpStatusCode.Forbidden, blockedLoginResponse.StatusCode);
 
-        var inviteResponse = await client.PostAsJsonAsync(
-            $"/api/rooms/{room!.Id}/invites",
-            new CreateInviteRequest { ExpiresInHours = 24 });
-        inviteResponse.EnsureSuccessStatusCode();
-        var invite = await inviteResponse.Content.ReadFromJsonAsync<CreateInviteResponse>();
-        Assert.NotNull(invite);
+        var adminToken = await LoginAsync(client, "admin", "admin12345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
 
-        var joinResponse = await client.PostAsJsonAsync(
-            "/api/rooms/join",
-            new JoinRoomRequest { InviteToken = invite!.InviteToken });
-        joinResponse.EnsureSuccessStatusCode();
+        var approvalsResponse = await client.GetFromJsonAsync<ApprovalsResponse>("/api/admin/approvals", JsonOptions);
+        Assert.NotNull(approvalsResponse);
+        var pending = approvalsResponse!.Users.Single(x => x.Username == "alice");
 
-        var joined = await joinResponse.Content.ReadFromJsonAsync<JoinRoomResponse>();
-        Assert.NotNull(joined);
-        Assert.Equal(room.Id, joined!.Room.Id);
-        Assert.False(string.IsNullOrWhiteSpace(joined.AppToken));
-        Assert.False(string.IsNullOrWhiteSpace(joined.RtcToken));
-        Assert.False(string.IsNullOrWhiteSpace(joined.RtcUrl));
+        var approveResponse = await client.PostAsync($"/api/admin/approvals/{pending.UserId}/approve", null);
+        Assert.Equal(HttpStatusCode.NoContent, approveResponse.StatusCode);
 
-        var rtcJwt = new JwtSecurityTokenHandler().ReadJwtToken(joined.RtcToken);
-        Assert.Contains(rtcJwt.Claims, x => x.Type == "name" && x.Value == joined.User.Nickname);
+        client.DefaultRequestHeaders.Authorization = null;
+        var aliceToken = await LoginAsync(client, "alice", "alice12345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", aliceToken);
+
+        var workspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(workspace);
+        var voiceChannel = workspace!.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice);
+
+        var connectResponse = await client.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest { ChannelId = voiceChannel.Id });
+        connectResponse.EnsureSuccessStatusCode();
+        var connected = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+        Assert.NotNull(connected);
+        Assert.False(string.IsNullOrWhiteSpace(connected!.RtcToken));
+        Assert.False(string.IsNullOrWhiteSpace(connected.RtcUrl));
+
+        var rtcJwt = new JwtSecurityTokenHandler().ReadJwtToken(connected.RtcToken);
+        Assert.Contains(rtcJwt.Claims, x => x.Type == "name" && x.Value == "alice");
     }
 
     [Fact]
-    public async Task JoinRoom_ShouldFailForExpiredInvite()
+    public async Task StreamPermit_ShouldEnforceChannelLimit()
     {
         var client = _factory.CreateClient();
-        var authToken = await AuthenticateAsync(client, "bob");
+        var adminToken = await LoginAsync(client, "admin", "admin12345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
 
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", authToken);
+        var createVoice = await client.PostAsJsonAsync(
+            "/api/workspace/channels",
+            new CreateChannelRequest
+            {
+                Name = "limited",
+                Type = Cascad.Api.Data.Entities.ChannelType.Voice,
+                MaxParticipants = 12,
+                MaxConcurrentStreams = 1
+            });
+        createVoice.EnsureSuccessStatusCode();
+        var channel = await createVoice.Content.ReadFromJsonAsync<ChannelDto>(JsonOptions);
+        Assert.NotNull(channel);
 
-        var createRoomResponse = await client.PostAsJsonAsync(
-            "/api/rooms",
-            new CreateRoomRequest { Name = "Duo Room" });
-        createRoomResponse.EnsureSuccessStatusCode();
-        var room = await createRoomResponse.Content.ReadFromJsonAsync<RoomDto>();
-        Assert.NotNull(room);
+        // Approve user1
+        await RegisterAndApproveAsync(client, "user1");
+        client.DefaultRequestHeaders.Authorization = null;
+        var user1Token = await LoginAsync(client, "user1", "user112345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", user1Token);
+        await client.GetAsync("/api/workspace");
+        await client.PostAsJsonAsync("/api/voice/connect", new VoiceConnectRequest { ChannelId = channel!.Id });
+        var permit1 = await client.PostAsJsonAsync(
+            "/api/voice/streams/permit",
+            new StreamPermitRequest { ChannelId = channel.Id });
+        var permit1Body = await permit1.Content.ReadFromJsonAsync<StreamPermitResponse>(JsonOptions);
+        Assert.NotNull(permit1Body);
+        Assert.True(permit1Body!.Allowed);
 
-        var inviteResponse = await client.PostAsJsonAsync(
-            $"/api/rooms/{room!.Id}/invites",
-            new CreateInviteRequest { ExpiresInHours = 24 });
-        inviteResponse.EnsureSuccessStatusCode();
-        var invite = await inviteResponse.Content.ReadFromJsonAsync<CreateInviteResponse>();
-        Assert.NotNull(invite);
-
-        using (var scope = _factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var inviteTokenService = scope.ServiceProvider.GetRequiredService<IInviteTokenService>();
-            var tokenHash = inviteTokenService.ComputeHash(invite!.InviteToken);
-
-            var inviteEntity = db.RoomInvites.Single(x => x.TokenHash == tokenHash);
-            inviteEntity.ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-1);
-            await db.SaveChangesAsync();
-        }
-
-        var joinResponse = await client.PostAsJsonAsync(
-            "/api/rooms/join",
-            new JoinRoomRequest { InviteToken = invite!.InviteToken });
-
-        Assert.Equal(HttpStatusCode.BadRequest, joinResponse.StatusCode);
+        // Approve user2
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await RegisterAndApproveAsync(client, "user2");
+        client.DefaultRequestHeaders.Authorization = null;
+        var user2Token = await LoginAsync(client, "user2", "user212345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", user2Token);
+        await client.GetAsync("/api/workspace");
+        await client.PostAsJsonAsync("/api/voice/connect", new VoiceConnectRequest { ChannelId = channel.Id });
+        var permit2 = await client.PostAsJsonAsync(
+            "/api/voice/streams/permit",
+            new StreamPermitRequest { ChannelId = channel.Id });
+        var permit2Body = await permit2.Content.ReadFromJsonAsync<StreamPermitResponse>(JsonOptions);
+        Assert.NotNull(permit2Body);
+        Assert.False(permit2Body!.Allowed);
     }
 
-    private static async Task<string> AuthenticateAsync(HttpClient client, string nickname)
+    private static async Task<string> LoginAsync(HttpClient client, string username, string password)
     {
         var response = await client.PostAsJsonAsync(
-            "/api/auth/guest",
-            new GuestAuthRequest { Nickname = nickname });
+            "/api/auth/login",
+            new LoginRequest
+            {
+                Username = username,
+                Password = password
+            });
         response.EnsureSuccessStatusCode();
-
-        var payload = await response.Content.ReadFromJsonAsync<GuestAuthResponse>();
+        var payload = await response.Content.ReadFromJsonAsync<LoginResponse>(JsonOptions);
         Assert.NotNull(payload);
         return payload!.AppToken;
+    }
+
+    private static async Task RegisterAndApproveAsync(HttpClient adminClient, string username)
+    {
+        await adminClient.PostAsJsonAsync(
+            "/api/auth/register",
+            new RegisterRequest
+            {
+                Username = username,
+                Password = $"{username}12345",
+                ConfirmPassword = $"{username}12345"
+            });
+
+        var approvals = await adminClient.GetFromJsonAsync<ApprovalsResponse>("/api/admin/approvals", JsonOptions);
+        var pending = approvals!.Users.Single(x => x.Username == username);
+        await adminClient.PostAsync($"/api/admin/approvals/{pending.UserId}/approve", null);
     }
 }

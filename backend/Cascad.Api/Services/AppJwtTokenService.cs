@@ -27,8 +27,10 @@ public sealed class AppJwtTokenService : IAppJwtTokenService
         {
             new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            new(ClaimTypes.Name, user.Nickname),
-            new("nickname", user.Nickname)
+            new(ClaimTypes.Name, user.Username),
+            new("username", user.Username),
+            new("status", user.Status.ToString()),
+            new(ClaimTypes.Role, user.PlatformRole.ToString())
         };
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey));

@@ -20,8 +20,8 @@ public sealed class LiveKitTokenServiceTests
         var user = new AppUser
         {
             Id = Guid.NewGuid(),
-            Nickname = "test-player",
-            NormalizedNickname = "TEST-PLAYER"
+            Username = "test-player",
+            NormalizedUsername = "TEST-PLAYER"
         };
         var room = new Room
         {

@@ -190,7 +190,7 @@ public sealed class RoomsController : ControllerBase
 
         return Ok(new JoinRoomResponse(
             ToRoomDto(invite.Room),
-            new UserDto(user.Id, user.Nickname),
+            new UserDto(user.Id, user.Username, user.Status, user.PlatformRole, user.AvatarUrl),
             appToken.Token,
             rtcToken,
             _liveKitOptions.RtcUrl));
@@ -225,7 +225,12 @@ public sealed class RoomsController : ControllerBase
 
         var participants = room.Presences
             .OrderByDescending(x => x.LastSeenAtUtc)
-            .Select(x => new UserDto(x.User.Id, x.User.Nickname))
+            .Select(x => new UserDto(
+                x.User.Id,
+                x.User.Username,
+                x.User.Status,
+                x.User.PlatformRole,
+                x.User.AvatarUrl))
             .ToList();
 
         return Ok(new RoomDetailsResponse(ToRoomDto(room), participants));

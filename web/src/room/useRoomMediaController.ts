@@ -431,7 +431,7 @@ export function useRoomMediaController(
     const localIdentity = room.localParticipant.identity;
     const localState: ParticipantState = {
       identity: localIdentity,
-      displayName: resolveDisplayName(room.localParticipant, session.user.nickname),
+      displayName: resolveDisplayName(room.localParticipant, session.user.username),
       isLocal: true,
       isScreenSharing: room.localParticipant.isScreenShareEnabled,
       voiceVolume: DEFAULT_CHANNEL_VOLUME,
@@ -774,7 +774,7 @@ export function useRoomMediaController(
       audioBindingsRef.current.clear();
       roomRef.current = null;
     };
-  }, [session.rtcToken, session.rtcUrl, session.user.nickname]);
+  }, [session.rtcToken, session.rtcUrl, session.user.username]);
 
   const patchParticipant = (identity: string, patch: Partial<ParticipantState>) => {
     setParticipants((previous) =>

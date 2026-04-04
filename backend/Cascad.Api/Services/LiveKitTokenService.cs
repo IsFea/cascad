@@ -18,13 +18,24 @@ public sealed class LiveKitTokenService : ILiveKitTokenService
 
     public string GenerateToken(Room room, AppUser user)
     {
+        return GenerateToken(room.LiveKitRoomName, user);
+    }
+
+    public string GenerateToken(Channel channel, AppUser user)
+    {
+        var roomName = channel.LiveKitRoomName ?? $"voice-{channel.Id:N}";
+        return GenerateToken(roomName, user);
+    }
+
+    public string GenerateToken(string roomName, AppUser user)
+    {
         var now = DateTime.UtcNow;
         var expiresAt = now.AddHours(6);
 
         var videoGrant = new Dictionary<string, object>
         {
             ["roomJoin"] = true,
-            ["room"] = room.LiveKitRoomName,
+            ["room"] = roomName,
             ["canPublish"] = true,
             ["canSubscribe"] = true,
             ["canPublishData"] = true

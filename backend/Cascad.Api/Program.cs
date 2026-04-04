@@ -1,10 +1,15 @@
 using System.Text;
+using System.Text.Json.Serialization;
 using Cascad.Api.Data;
+using Cascad.Api.Data.Entities;
+using Cascad.Api.Hubs;
 using Cascad.Api.Options;
 using Cascad.Api.Services;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,6 +18,8 @@ builder.Services.Configure<AppJwtOptions>(builder.Configuration.GetSection(AppJw
 builder.Services.Configure<LiveKitOptions>(builder.Configuration.GetSection(LiveKitOptions.SectionName));
 builder.Services.Configure<ClientOptions>(builder.Configuration.GetSection(ClientOptions.SectionName));
 builder.Services.Configure<SeedOptions>(builder.Configuration.GetSection(SeedOptions.SectionName));
+builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
+builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection(StorageOptions.SectionName));
 
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
@@ -25,8 +32,16 @@ builder.Services.AddScoped<IAppJwtTokenService, AppJwtTokenService>();
 builder.Services.AddScoped<IInviteTokenService, InviteTokenService>();
 builder.Services.AddScoped<ILiveKitTokenService, LiveKitTokenService>();
 builder.Services.AddScoped<IDatabaseSeeder, DatabaseSeeder>();
+builder.Services.AddScoped<IDatabaseSchemaUpgrader, DatabaseSchemaUpgrader>();
+builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 
-builder.Services.AddControllers();
+builder.Services
+    .AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    });
+builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -103,6 +118,8 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     await db.Database.EnsureCreatedAsync();
+    var schemaUpgrader = scope.ServiceProvider.GetRequiredService<IDatabaseSchemaUpgrader>();
+    await schemaUpgrader.UpgradeAsync();
     var seeder = scope.ServiceProvider.GetRequiredService<IDatabaseSeeder>();
     await seeder.SeedAsync();
 }
@@ -113,11 +130,27 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+var storageOptions = app.Services.GetRequiredService<IConfiguration>()
+    .GetSection(StorageOptions.SectionName)
+    .Get<StorageOptions>() ?? new StorageOptions();
+var uploadRoot = storageOptions.RootPath;
+if (!Path.IsPathRooted(uploadRoot))
+{
+    uploadRoot = Path.Combine(AppContext.BaseDirectory, uploadRoot);
+}
+Directory.CreateDirectory(uploadRoot);
+
 app.UseCors("client");
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(uploadRoot),
+    RequestPath = storageOptions.PublicBasePath
+});
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<ChatHub>("/hubs/chat");
 app.MapGet("/health", () => Results.Ok(new { status = "ok", utc = DateTime.UtcNow }));
 
 app.Run();

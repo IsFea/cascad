@@ -4,7 +4,6 @@ import {
   Badge,
   Box,
   Button,
-  Chip,
   CircularProgress,
   Container,
   CssBaseline,
@@ -25,15 +24,17 @@ import {
   Tabs,
   TextField,
   ThemeProvider,
+  Tooltip,
   Typography,
   createTheme,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import AddReactionIcon from "@mui/icons-material/AddReaction";
+import CloseIcon from "@mui/icons-material/Close";
 import LogoutIcon from "@mui/icons-material/Logout";
 import SendIcon from "@mui/icons-material/Send";
 import { HubConnection, HubConnectionBuilder, HubConnectionState, LogLevel } from "@microsoft/signalr";
-import { FormEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ClipboardEvent as ReactClipboardEvent, FormEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EmbeddedVoiceControls,
   EmbeddedVoiceStage,
@@ -48,7 +49,10 @@ import {
   ChannelType,
   JoinRoomResponse,
   LoginResponse,
+  MentionCandidateDto,
+  MentionCandidatesResponse,
   MeResponse,
+  MessageAttachmentDto,
   PendingApprovalDto,
   PlatformRole,
   ProfileResponse,
@@ -76,6 +80,12 @@ import {
   VoiceEarconType,
 } from "./voicePresence";
 import { getSafeImageUrl, markImageUrlBroken } from "./imageUrlFallback";
+import { applyMentionSelection, findTrailingMentionQuery, MentionQuery } from "./chat/mentions";
+import { renderMessageContent } from "./chat/renderMessageContent";
+import { useChatState } from "./chat/useChatState";
+import { buildMessageTimeline } from "./chat/messageTimeline";
+import { formatFullMessageTime, formatRelativeMessageTime } from "./chat/timestamps";
+import { appendAttachmentUrl, extractImageFilesFromClipboardItems, removeAttachmentUrl } from "./chat/composerAttachments";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
 const TOKEN_KEY = "cascad_app_token";
@@ -372,28 +382,6 @@ async function playVoiceEarcon(context: AudioContext, type: VoiceEarconType) {
   masterGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
 }
 
-function renderMentions(content: string) {
-  const parts = content.split(/(@[\p{L}\p{N}._-]{2,32})/gu);
-  return parts.map((part, index) => {
-    if (part.startsWith("@")) {
-      return (
-        <Box
-          key={`${part}-${index}`}
-          component="span"
-          sx={{
-            color: "primary.light",
-            fontWeight: 700,
-          }}
-        >
-          {part}
-        </Box>
-      );
-    }
-
-    return <span key={`${part}-${index}`}>{part}</span>;
-  });
-}
-
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -649,11 +637,19 @@ function WorkspaceShell(props: {
   const [speakingUserIds, setSpeakingUserIds] = useState<Set<string>>(new Set());
 
   const [messageDraft, setMessageDraft] = useState("");
-  const [messages, setMessages] = useState<ChannelMessageDto[]>([]);
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
+  const [mentionCandidates, setMentionCandidates] = useState<MentionCandidateDto[]>([]);
+  const [imageLightbox, setImageLightbox] = useState<{
+    attachments: MessageAttachmentDto[];
+    index: number;
+    zoom: number;
+  } | null>(null);
   const [liveVoiceMessages, setLiveVoiceMessages] = useState<
     Array<{ userId: string; username: string; content: string; createdAtUtc: string }>
   >([]);
+  const { messagesByChannel, replaceChannelMessages, upsertChannelMessage, upsertChannelMessages } =
+    useChatState();
 
   const [selfMuted, setSelfMuted] = useState(false);
   const [selfDeafened, setSelfDeafened] = useState(false);
@@ -701,6 +697,8 @@ function WorkspaceShell(props: {
   const joinedWorkspaceIdRef = useRef<string | null>(null);
   const joinedTextChannelIdRef = useRef<string | null>(null);
   const joinedVoiceChannelIdRef = useRef<string | null>(null);
+  const mentionFetchSeqRef = useRef(0);
+  const chatMessagesByChannelRef = useRef<Record<string, ChannelMessageDto[]>>({});
   const tabInstanceId = useMemo(() => {
     const existing = sessionStorage.getItem(VOICE_TAB_INSTANCE_KEY);
     if (existing) {
@@ -810,6 +808,24 @@ function WorkspaceShell(props: {
     return voiceChannels.find((x) => x.id === selectedVoiceChannelId) ?? null;
   }, [selectedVoiceChannelId, voiceChannels]);
 
+  const selectedChannelMessages = useMemo(() => {
+    if (!selectedTextChannelId) {
+      return [];
+    }
+
+    return messagesByChannel[selectedTextChannelId] ?? [];
+  }, [messagesByChannel, selectedTextChannelId]);
+  const [timelineNowMs, setTimelineNowMs] = useState(() => Date.now());
+
+  const messageTimeline = useMemo(
+    () => buildMessageTimeline(selectedChannelMessages, timelineNowMs),
+    [selectedChannelMessages, timelineNowMs],
+  );
+  const composerAutocompleteToken = useMemo(
+    () => `new-password-${tabInstanceId}`,
+    [tabInstanceId],
+  );
+
   const memberStateByUserId = useMemo(() => {
     const map = new Map<string, WorkspaceMemberDto>();
     for (const member of workspaceData?.members ?? []) {
@@ -817,6 +833,20 @@ function WorkspaceShell(props: {
     }
     return map;
   }, [workspaceData?.members]);
+
+  useEffect(() => {
+    chatMessagesByChannelRef.current = messagesByChannel;
+  }, [messagesByChannel]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setTimelineNowMs(Date.now());
+    }, 30_000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const patchSelfWorkspaceVoiceState = useCallback(
     (next: {
@@ -994,15 +1024,41 @@ function WorkspaceShell(props: {
     setPendingApprovals(response.users);
   };
 
-  const loadMessages = async (channelId: string) => {
+  const loadRecentMessages = useCallback(async (channelId: string) => {
     const response = await apiCall<ChannelMessagesResponse>(
       `/channels/${channelId}/messages?limit=50`,
       "GET",
       undefined,
       props.token,
     );
-    setMessages(response.messages);
-  };
+    replaceChannelMessages(channelId, response.messages);
+  }, [props.token, replaceChannelMessages]);
+
+  const loadMessageUpdates = useCallback(async (channelId: string, afterCursor: string) => {
+    const response = await apiCall<ChannelMessagesResponse>(
+      `/channels/${channelId}/messages?limit=100&after=${encodeURIComponent(afterCursor)}`,
+      "GET",
+      undefined,
+      props.token,
+    );
+    upsertChannelMessages(channelId, response.messages);
+  }, [props.token, upsertChannelMessages]);
+
+  const syncMessagesForChannel = useCallback(async (channelId: string) => {
+    const current = chatMessagesByChannelRef.current[channelId] ?? [];
+    if (current.length === 0) {
+      await loadRecentMessages(channelId);
+      return;
+    }
+
+    const latestCursor = current[current.length - 1]?.createdAtUtc;
+    if (!latestCursor) {
+      await loadRecentMessages(channelId);
+      return;
+    }
+
+    await loadMessageUpdates(channelId, latestCursor);
+  }, [loadMessageUpdates, loadRecentMessages]);
 
   const tryPlayVoiceEarcon = (type: VoiceEarconType) => {
     const nowMs = performance.now();
@@ -1191,14 +1247,54 @@ function WorkspaceShell(props: {
 
   useEffect(() => {
     if (!selectedTextChannelId) {
-      setMessages([]);
+      setMentionCandidates([]);
+      setMentionQuery(null);
       return;
     }
 
-    void loadMessages(selectedTextChannelId).catch((reason) => {
+    void syncMessagesForChannel(selectedTextChannelId).catch((reason) => {
       setError(reason instanceof Error ? reason.message : "Failed to load messages");
     });
-  }, [props.token, selectedTextChannelId]);
+  }, [selectedTextChannelId, syncMessagesForChannel]);
+
+  useEffect(() => {
+    setMentionQuery(findTrailingMentionQuery(messageDraft));
+  }, [messageDraft]);
+
+  useEffect(() => {
+    if (!selectedTextChannelId || !mentionQuery) {
+      setMentionCandidates([]);
+      return;
+    }
+
+    const seq = ++mentionFetchSeqRef.current;
+    const timeoutId = window.setTimeout(() => {
+      const search = mentionQuery.query.trim();
+      const query = encodeURIComponent(search);
+      void apiCall<MentionCandidatesResponse>(
+        `/channels/${selectedTextChannelId}/mention-candidates?q=${query}&limit=8`,
+        "GET",
+        undefined,
+        props.token,
+      )
+        .then((response) => {
+          if (mentionFetchSeqRef.current !== seq) {
+            return;
+          }
+          setMentionCandidates(response.users);
+        })
+        .catch(() => {
+          if (mentionFetchSeqRef.current !== seq) {
+            return;
+          }
+          setMentionCandidates([]);
+        });
+    }, 180);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [mentionQuery, props.token, selectedTextChannelId]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -1375,9 +1471,7 @@ function WorkspaceShell(props: {
     joinedVoiceChannelIdRef.current = null;
 
     hub.on("textMessage", (message: ChannelMessageDto) => {
-      if (message.channelId === selectedTextChannelIdRef.current) {
-        setMessages((current) => [...current, message]);
-      }
+      upsertChannelMessage(message.channelId, message);
     });
 
     hub.on(
@@ -1526,6 +1620,10 @@ function WorkspaceShell(props: {
     hub.onreconnected(() => {
       void syncHubGroups(hub);
       void loadWorkspace().catch(() => undefined);
+      const activeTextChannelId = selectedTextChannelIdRef.current;
+      if (activeTextChannelId) {
+        void syncMessagesForChannel(activeTextChannelId).catch(() => undefined);
+      }
     });
 
     return () => {
@@ -1537,7 +1635,7 @@ function WorkspaceShell(props: {
       joinedVoiceChannelIdRef.current = null;
       void hub.stop();
     };
-  }, [props.token, syncHubGroups]);
+  }, [loadWorkspace, props.token, syncHubGroups, syncMessagesForChannel, upsertChannelMessage]);
 
   useEffect(() => {
     const hub = hubRef.current;
@@ -1664,19 +1762,23 @@ function WorkspaceShell(props: {
       return;
     }
 
+    const clientMessageId = crypto.randomUUID();
     const created = await apiCall<ChannelMessageDto>(
       `/channels/${selectedTextChannelId}/messages`,
       "POST",
       {
+        clientMessageId,
         content: messageDraft,
         attachmentUrls: attachments,
       },
       props.token,
     );
 
-    setMessages((current) => [...current, created]);
+    upsertChannelMessage(selectedTextChannelId, created);
     setMessageDraft("");
     setAttachments([]);
+    setMentionCandidates([]);
+    setMentionQuery(null);
   };
 
   const uploadChatImage = async (file: File) => {
@@ -1692,8 +1794,121 @@ function WorkspaceShell(props: {
       formData,
       props.token,
     );
-    setAttachments((current) => [...current, uploaded.url].slice(-4));
+    setAttachments((current) => appendAttachmentUrl(current, uploaded.url));
   };
+
+  const removeComposerAttachment = (url: string) => {
+    setAttachments((current) => removeAttachmentUrl(current, url));
+  };
+
+  const handleComposerPaste = (event: ReactClipboardEvent<HTMLInputElement>) => {
+    const files = extractImageFilesFromClipboardItems(Array.from(event.clipboardData?.items ?? []));
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const availableSlots = Math.max(0, 4 - attachments.length);
+    for (const file of files.slice(0, availableSlots)) {
+      void uploadChatImage(file).catch((reason) => {
+        setError(reason instanceof Error ? reason.message : "Upload failed");
+      });
+    }
+  };
+
+  const selectMentionCandidate = (candidate: MentionCandidateDto) => {
+    if (!mentionQuery) {
+      return;
+    }
+
+    setMessageDraft((current) => applyMentionSelection(current, mentionQuery, candidate.username));
+    setMentionCandidates([]);
+    setMentionQuery(null);
+  };
+
+  const openImageLightbox = (messageAttachments: MessageAttachmentDto[], index: number) => {
+    if (messageAttachments.length === 0) {
+      return;
+    }
+
+    const safeIndex = Math.min(Math.max(index, 0), messageAttachments.length - 1);
+    setImageLightbox({
+      attachments: messageAttachments,
+      index: safeIndex,
+      zoom: 1,
+    });
+  };
+
+  const closeImageLightbox = () => {
+    setImageLightbox(null);
+  };
+
+  const shiftLightboxIndex = useCallback((delta: number) => {
+    setImageLightbox((current) => {
+      if (!current || current.attachments.length < 2) {
+        return current;
+      }
+
+      const nextIndex =
+        (current.index + delta + current.attachments.length) % current.attachments.length;
+      return { ...current, index: nextIndex };
+    });
+  }, []);
+
+  const adjustLightboxZoom = useCallback((delta: number) => {
+    setImageLightbox((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        zoom: Math.min(4, Math.max(1, Number((current.zoom + delta).toFixed(2)))),
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!imageLightbox) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeImageLightbox();
+        return;
+      }
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        shiftLightboxIndex(-1);
+        return;
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        shiftLightboxIndex(1);
+        return;
+      }
+
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        adjustLightboxZoom(0.2);
+        return;
+      }
+
+      if (event.key === "-") {
+        event.preventDefault();
+        adjustLightboxZoom(-0.2);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [adjustLightboxZoom, imageLightbox, shiftLightboxIndex]);
 
   const openAvatarPicker = () => {
     avatarInputRef.current?.click();
@@ -2574,77 +2789,257 @@ function WorkspaceShell(props: {
             </Stack>
 
             <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", pr: 0.4 }}>
-              <Stack spacing={1}>
-                {messages.map((message) => (
-                  <Paper
-                    key={message.id}
-                    variant="outlined"
-                    sx={{
-                      p: 1,
-                      bgcolor:
-                        message.userId === props.currentUser.id
-                          ? alpha("#6ea4ff", 0.11)
-                          : "transparent",
-                    }}
-                  >
-                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
-                      <Avatar
-                        src={getSafeImageUrl(message.avatarUrl)}
-                        imgProps={{
-                          onError: () => {
-                            markImageUrlBroken(message.avatarUrl);
-                          },
-                        }}
-                        sx={{ width: 24, height: 24, fontSize: "0.75rem" }}
+              <Stack spacing={0.1}>
+                {messageTimeline.map((item) => {
+                  if (item.kind === "separator") {
+                    return (
+                      <Stack
+                        key={item.key}
+                        direction="row"
+                        spacing={1}
+                        alignItems="center"
+                        sx={{ py: 1.1, px: 1 }}
                       >
-                        {message.username[0]?.toUpperCase() ?? "?"}
-                      </Avatar>
-                      <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                        {message.username}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {new Date(message.createdAtUtc).toLocaleTimeString()}
-                      </Typography>
-                    </Stack>
-                    <Typography variant="body2">{renderMentions(message.content)}</Typography>
-                    {message.attachments.length > 0 && (
-                      <Stack direction="row" spacing={0.8} sx={{ mt: 0.8 }} flexWrap="wrap" useFlexGap>
-                        {message.attachments.map((attachment) => (
-                          <Box
-                            key={attachment.id}
-                            component="img"
-                            src={getSafeImageUrl(attachment.urlPath)}
-                            alt={attachment.originalFileName}
-                            onError={(event) => {
-                              markImageUrlBroken(attachment.urlPath);
-                              event.currentTarget.style.display = "none";
-                            }}
-                            sx={{
-                              width: 160,
-                              height: 100,
-                              objectFit: "cover",
-                              borderRadius: 1,
-                              border: "1px solid rgba(117, 142, 171, 0.35)",
-                            }}
-                          />
-                        ))}
+                        <Divider sx={{ flex: 1, borderColor: "rgba(122, 136, 156, 0.24)" }} />
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            color: "text.disabled",
+                            letterSpacing: 0.35,
+                            textTransform: "uppercase",
+                            fontSize: "0.66rem",
+                          }}
+                        >
+                          {item.label}
+                        </Typography>
+                        <Divider sx={{ flex: 1, borderColor: "rgba(122, 136, 156, 0.24)" }} />
                       </Stack>
-                    )}
-                  </Paper>
-                ))}
+                    );
+                  }
+
+                  const message = item.message;
+                  const shortTime = formatRelativeMessageTime(message.createdAtUtc, timelineNowMs);
+                  const fullTime = formatFullMessageTime(message.createdAtUtc);
+                  const attachmentCount = message.attachments.length;
+                  const isOwnMessage = message.userId === props.currentUser.id;
+
+                  return (
+                    <Box
+                      key={item.key}
+                      className="chat-message-row"
+                      sx={{
+                        px: 1,
+                        py: item.showHeader ? 0.75 : 0.38,
+                        borderRadius: 1,
+                        bgcolor: isOwnMessage ? alpha("#6ea4ff", item.showHeader ? 0.08 : 0.045) : "transparent",
+                        transition: "background-color 120ms ease",
+                        "&:hover": {
+                          bgcolor: isOwnMessage ? alpha("#6ea4ff", 0.12) : "rgba(115, 129, 151, 0.09)",
+                        },
+                        "&:hover .chat-inline-time": {
+                          opacity: 1,
+                        },
+                      }}
+                    >
+                      <Stack direction="row" spacing={1.1} alignItems="flex-start">
+                        <Box sx={{ width: 28, flexShrink: 0, minHeight: 16, pt: 0.1, display: "grid", placeItems: "start" }}>
+                          {item.showHeader ? (
+                            <Avatar
+                              src={getSafeImageUrl(message.avatarUrl)}
+                              imgProps={{
+                                onError: () => {
+                                  markImageUrlBroken(message.avatarUrl);
+                                },
+                              }}
+                              sx={{ width: 26, height: 26, fontSize: "0.75rem" }}
+                            >
+                              {message.username[0]?.toUpperCase() ?? "?"}
+                            </Avatar>
+                          ) : (
+                            <Tooltip title={fullTime} placement="left">
+                              <Typography
+                                className="chat-inline-time"
+                                variant="caption"
+                                sx={{
+                                  color: "text.disabled",
+                                  fontSize: "0.62rem",
+                                  opacity: 0,
+                                  transition: "opacity 120ms ease",
+                                  userSelect: "none",
+                                }}
+                              >
+                                {shortTime}
+                              </Typography>
+                            </Tooltip>
+                          )}
+                        </Box>
+
+                        <Box sx={{ minWidth: 0, flex: 1 }}>
+                          {item.showHeader && (
+                            <Stack direction="row" spacing={0.8} alignItems="baseline" sx={{ mb: 0.18 }}>
+                              <Typography variant="body2" sx={{ fontWeight: 650, color: "#dce8ff" }}>
+                                {message.username}
+                              </Typography>
+                              <Tooltip title={fullTime} placement="top">
+                                <Typography variant="caption" sx={{ color: "text.disabled", fontSize: "0.67rem" }}>
+                                  {shortTime}
+                                </Typography>
+                              </Tooltip>
+                            </Stack>
+                          )}
+
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                              lineHeight: 1.44,
+                              color: "rgba(229, 236, 247, 0.95)",
+                            }}
+                          >
+                            {renderMessageContent(message.content, message.mentions)}
+                          </Typography>
+
+                          {attachmentCount > 0 && (
+                            <Box
+                              sx={{
+                                mt: 0.72,
+                                width: "min(100%, 460px)",
+                                display: "grid",
+                                gap: 0.55,
+                                gridTemplateColumns:
+                                  attachmentCount === 1
+                                    ? "minmax(0, 1fr)"
+                                    : "repeat(2, minmax(0, 1fr))",
+                              }}
+                            >
+                              {message.attachments.map((attachment, attachmentIndex) => {
+                                const largeTile = attachmentCount === 3 && attachmentIndex === 0;
+                                const tileHeight =
+                                  attachmentCount === 1 ? 224 : largeTile ? 162 : 112;
+
+                                return (
+                                  <Box
+                                    key={attachment.id}
+                                    component="img"
+                                    src={getSafeImageUrl(attachment.urlPath)}
+                                    alt={attachment.originalFileName}
+                                    onClick={() => openImageLightbox(message.attachments, attachmentIndex)}
+                                    onError={(event) => {
+                                      markImageUrlBroken(attachment.urlPath);
+                                      event.currentTarget.style.display = "none";
+                                    }}
+                                    sx={{
+                                      width: "100%",
+                                      height: tileHeight,
+                                      objectFit: "cover",
+                                      borderRadius: 1.15,
+                                      border: "1px solid rgba(112, 128, 151, 0.34)",
+                                      cursor: "zoom-in",
+                                      gridColumn: largeTile ? "1 / span 2" : "auto",
+                                      transition: "transform 120ms ease, border-color 120ms ease",
+                                      "&:hover": {
+                                        transform: "translateY(-1px)",
+                                        borderColor: "rgba(151, 189, 255, 0.72)",
+                                      },
+                                    }}
+                                  />
+                                );
+                              })}
+                            </Box>
+                          )}
+                        </Box>
+                      </Stack>
+                    </Box>
+                  );
+                })}
               </Stack>
             </Box>
 
             <Divider sx={{ my: 1 }} />
 
-            <Box component="form" onSubmit={sendTextMessage}>
+            <Box component="form" onSubmit={sendTextMessage} autoComplete="off">
               <Stack spacing={0.8}>
                 {attachments.length > 0 && (
-                  <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap>
+                  <Stack direction="row" spacing={0.7} sx={{ overflowX: "auto", pb: 0.3, pr: 0.2 }}>
                     {attachments.map((url) => (
-                      <Chip key={url} size="small" label={url.split("/").pop() ?? "image"} />
+                      <Box
+                        key={url}
+                        sx={{
+                          position: "relative",
+                          width: 86,
+                          height: 58,
+                          flexShrink: 0,
+                          borderRadius: 1,
+                          overflow: "hidden",
+                          border: "1px solid rgba(116, 132, 155, 0.45)",
+                          bgcolor: "rgba(30, 37, 49, 0.95)",
+                        }}
+                      >
+                        <Box
+                          component="img"
+                          src={getSafeImageUrl(url)}
+                          alt={url.split("/").pop() ?? "attachment"}
+                          onError={(event) => {
+                            markImageUrlBroken(url);
+                            event.currentTarget.style.display = "none";
+                          }}
+                          sx={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "cover",
+                          }}
+                        />
+                        <IconButton
+                          size="small"
+                          onClick={() => removeComposerAttachment(url)}
+                          sx={{
+                            position: "absolute",
+                            top: 2,
+                            right: 2,
+                            width: 18,
+                            height: 18,
+                            bgcolor: "rgba(12, 15, 21, 0.72)",
+                            color: "#e9edf5",
+                            "&:hover": {
+                              bgcolor: "rgba(25, 31, 43, 0.9)",
+                            },
+                          }}
+                        >
+                          <CloseIcon sx={{ fontSize: 14 }} />
+                        </IconButton>
+                      </Box>
                     ))}
                   </Stack>
+                )}
+
+                {mentionQuery && mentionCandidates.length > 0 && (
+                  <Paper variant="outlined" sx={{ maxHeight: 180, overflowY: "auto" }}>
+                    <List dense disablePadding>
+                      {mentionCandidates.map((candidate) => (
+                        <ListItemButton
+                          key={candidate.userId}
+                          onClick={() => selectMentionCandidate(candidate)}
+                        >
+                          <Avatar
+                            src={getSafeImageUrl(candidate.avatarUrl)}
+                            imgProps={{
+                              onError: () => {
+                                markImageUrlBroken(candidate.avatarUrl);
+                              },
+                            }}
+                            sx={{ width: 22, height: 22, mr: 1, fontSize: "0.75rem" }}
+                          >
+                            {candidate.username[0]?.toUpperCase() ?? "?"}
+                          </Avatar>
+                          <ListItemText
+                            primary={`@${candidate.username}`}
+                            secondary={candidate.userId === props.currentUser.id ? "you" : undefined}
+                          />
+                        </ListItemButton>
+                      ))}
+                    </List>
+                  </Paper>
                 )}
 
                 <Stack direction="row" spacing={0.8}>
@@ -2654,6 +3049,17 @@ function WorkspaceShell(props: {
                     placeholder="Message with @mentions and emoji"
                     value={messageDraft}
                     onChange={(event) => setMessageDraft(event.target.value)}
+                    onPaste={handleComposerPaste}
+                    autoComplete="off"
+                    name={composerAutocompleteToken}
+                    inputProps={{
+                      autoComplete: composerAutocompleteToken,
+                    }}
+                    onBlur={() => {
+                      window.setTimeout(() => {
+                        setMentionCandidates([]);
+                      }, 120);
+                    }}
                   />
                   <IconButton
                     size="small"
@@ -2688,6 +3094,77 @@ function WorkspaceShell(props: {
           </Box>
         </Paper>
       </Box>
+
+      <Dialog
+        open={Boolean(imageLightbox)}
+        onClose={closeImageLightbox}
+        fullWidth
+        maxWidth="lg"
+        PaperProps={{
+          sx: {
+            bgcolor: "rgba(6, 9, 14, 0.97)",
+            border: "1px solid rgba(90, 104, 126, 0.42)",
+            boxShadow: "0 28px 80px rgba(0, 0, 0, 0.48)",
+            backdropFilter: "blur(2px)",
+          },
+        }}
+      >
+        <DialogTitle sx={{ borderBottom: "1px solid rgba(90, 104, 126, 0.3)" }}>Image Viewer</DialogTitle>
+        <DialogContent sx={{ bgcolor: "rgba(3, 6, 10, 0.86)" }}>
+          {imageLightbox && (
+            <Box sx={{ display: "grid", placeItems: "center", minHeight: 420 }}>
+              <Box
+                component="img"
+                src={getSafeImageUrl(imageLightbox.attachments[imageLightbox.index]?.urlPath ?? null)}
+                alt={imageLightbox.attachments[imageLightbox.index]?.originalFileName ?? "image"}
+                onWheel={(event) => {
+                  event.preventDefault();
+                  adjustLightboxZoom(event.deltaY < 0 ? 0.16 : -0.16);
+                }}
+                sx={{
+                  maxWidth: "100%",
+                  maxHeight: "70vh",
+                  objectFit: "contain",
+                  transform: `scale(${imageLightbox.zoom})`,
+                  transformOrigin: "center center",
+                  transition: "transform 120ms ease",
+                }}
+              />
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ justifyContent: "space-between" }}>
+          <Stack direction="row" spacing={1}>
+            <Button
+              onClick={() => shiftLightboxIndex(-1)}
+              disabled={!imageLightbox || imageLightbox.attachments.length < 2}
+            >
+              Prev
+            </Button>
+            <Button
+              onClick={() => shiftLightboxIndex(1)}
+              disabled={!imageLightbox || imageLightbox.attachments.length < 2}
+            >
+              Next
+            </Button>
+          </Stack>
+          <Stack direction="row" spacing={1}>
+            <Button
+              onClick={() => adjustLightboxZoom(-0.2)}
+              disabled={!imageLightbox}
+            >
+              Zoom -
+            </Button>
+            <Button
+              onClick={() => adjustLightboxZoom(0.2)}
+              disabled={!imageLightbox}
+            >
+              Zoom +
+            </Button>
+            <Button onClick={closeImageLightbox}>Close</Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
 
       <Popover
         open={Boolean(emojiAnchorEl)}

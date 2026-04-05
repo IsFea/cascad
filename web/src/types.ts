@@ -90,6 +90,7 @@ export type MessageAttachmentDto = {
 export type MessageMentionDto = {
   userId: string;
   username: string;
+  token: string;
 };
 
 export type ChannelMessageDto = {
@@ -107,6 +108,16 @@ export type ChannelMessageDto = {
 export type ChannelMessagesResponse = {
   messages: ChannelMessageDto[];
   nextBefore: string | null;
+};
+
+export type MentionCandidateDto = {
+  userId: string;
+  username: string;
+  avatarUrl: string | null;
+};
+
+export type MentionCandidatesResponse = {
+  users: MentionCandidateDto[];
 };
 
 export type UploadImageResponse = {

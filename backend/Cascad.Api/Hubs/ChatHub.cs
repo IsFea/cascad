@@ -17,9 +17,31 @@ public sealed class ChatHub : Hub
         _db = db;
     }
 
-    public Task JoinTextChannel(Guid channelId)
+    public async Task JoinTextChannel(Guid channelId)
     {
-        return Groups.AddToGroupAsync(Context.ConnectionId, ChatGroupNames.TextChannel(channelId));
+        if (Context.User is null || !Context.User.TryGetUserId(out var userId))
+        {
+            return;
+        }
+
+        var channel = await _db.Channels
+            .Where(x => x.Id == channelId && !x.IsDeleted)
+            .Select(x => new { x.Id, x.WorkspaceId, x.Type })
+            .SingleOrDefaultAsync(Context.ConnectionAborted);
+        if (channel is null || channel.Type != Cascad.Api.Data.Entities.ChannelType.Text)
+        {
+            return;
+        }
+
+        var isMember = await _db.WorkspaceMembers.AnyAsync(
+            x => x.WorkspaceId == channel.WorkspaceId && x.UserId == userId,
+            Context.ConnectionAborted);
+        if (!isMember)
+        {
+            return;
+        }
+
+        await Groups.AddToGroupAsync(Context.ConnectionId, ChatGroupNames.TextChannel(channelId));
     }
 
     public async Task JoinWorkspace(Guid workspaceId)

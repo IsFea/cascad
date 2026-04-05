@@ -33,6 +33,7 @@ public sealed partial class ChannelsController : ControllerBase
     public async Task<ActionResult<ChannelMessagesResponse>> GetMessages(
         Guid channelId,
         [FromQuery] string? before,
+        [FromQuery] string? after,
         [FromQuery] int limit = 40,
         CancellationToken cancellationToken = default)
     {
@@ -58,29 +59,102 @@ public sealed partial class ChannelsController : ControllerBase
         }
 
         var safeLimit = Math.Clamp(limit, 1, 100);
+        var hasBefore = TryParseCursor(before, out var beforeUtc);
+        var hasAfter = TryParseCursor(after, out var afterUtc);
+
         var query = _db.ChannelMessages
             .Where(x => x.ChannelId == channelId)
             .Include(x => x.User)
             .Include(x => x.Attachments)
             .Include(x => x.Mentions)
             .ThenInclude(x => x.MentionedUser)
-            .OrderByDescending(x => x.CreatedAtUtc)
             .AsQueryable();
 
-        if (DateTime.TryParse(before, out var beforeUtc))
+        if (hasBefore)
         {
-            query = query.Where(x => x.CreatedAtUtc < beforeUtc.ToUniversalTime());
+            query = query.Where(x => x.CreatedAtUtc < beforeUtc.UtcDateTime);
         }
 
-        var messages = await query.Take(safeLimit + 1).ToListAsync(cancellationToken);
+        if (hasAfter)
+        {
+            query = query.Where(x => x.CreatedAtUtc > afterUtc.UtcDateTime);
+            var updates = await query
+                .OrderBy(x => x.CreatedAtUtc)
+                .Take(safeLimit)
+                .ToListAsync(cancellationToken);
+
+            return Ok(new ChannelMessagesResponse(updates.Select(ToDto).ToList(), null));
+        }
+
+        var messages = await query
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .Take(safeLimit + 1)
+            .ToListAsync(cancellationToken);
         var hasNext = messages.Count > safeLimit;
         var page = messages.Take(safeLimit).OrderBy(x => x.CreatedAtUtc).ToList();
-        var nextBefore = hasNext ? page.First().CreatedAtUtc.ToString("O") : null;
+        var nextBefore = hasNext && page.Count > 0 ? page.First().CreatedAtUtc.ToString("O") : null;
 
         return Ok(new ChannelMessagesResponse(page.Select(ToDto).ToList(), nextBefore));
     }
 
+    [HttpGet("{channelId:guid}/mention-candidates")]
+    [ProducesResponseType<MentionCandidatesResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<MentionCandidatesResponse>> GetMentionCandidates(
+        Guid channelId,
+        [FromQuery] string? q,
+        [FromQuery] int limit = 8,
+        CancellationToken cancellationToken = default)
+    {
+        if (!User.TryGetUserId(out var userId))
+        {
+            return Unauthorized();
+        }
+
+        var channel = await _db.Channels.SingleOrDefaultAsync(
+            x => x.Id == channelId && !x.IsDeleted,
+            cancellationToken);
+        if (channel is null || channel.Type != ChannelType.Text)
+        {
+            return NotFound();
+        }
+
+        var isMember = await _db.WorkspaceMembers.AnyAsync(
+            x => x.WorkspaceId == channel.WorkspaceId && x.UserId == userId,
+            cancellationToken);
+        if (!isMember)
+        {
+            return Forbid();
+        }
+
+        var safeLimit = Math.Clamp(limit, 1, 20);
+        var normalizedQuery = q?.Trim().ToUpperInvariant();
+
+        var membersQuery = _db.WorkspaceMembers
+            .Where(x => x.WorkspaceId == channel.WorkspaceId)
+            .Include(x => x.User)
+            .AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(normalizedQuery))
+        {
+            membersQuery = membersQuery.Where(x => x.User.NormalizedUsername.Contains(normalizedQuery));
+        }
+
+        var users = await membersQuery
+            .OrderBy(x => x.User.Username)
+            .Take(safeLimit)
+            .Select(x => new MentionCandidateDto(
+                x.UserId,
+                x.User.Username,
+                x.User.AvatarUrl))
+            .ToListAsync(cancellationToken);
+
+        return Ok(new MentionCandidatesResponse(users));
+    }
+
     [HttpPost("{channelId:guid}/messages")]
+    [ProducesResponseType<ChannelMessageDto>(StatusCodes.Status200OK)]
     [ProducesResponseType<ChannelMessageDto>(StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
@@ -126,11 +200,25 @@ public sealed partial class ChannelsController : ControllerBase
             });
         }
 
+        if (request.ClientMessageId.HasValue)
+        {
+            var existing = await FindByClientMessageIdAsync(
+                channelId,
+                userId,
+                request.ClientMessageId.Value,
+                cancellationToken);
+            if (existing is not null)
+            {
+                return Ok(ToDto(existing));
+            }
+        }
+
         var message = new ChannelMessage
         {
             WorkspaceId = channel.WorkspaceId,
             ChannelId = channel.Id,
             UserId = user.Id,
+            ClientMessageId = request.ClientMessageId,
             Content = content,
             CreatedAtUtc = DateTime.UtcNow
         };
@@ -154,12 +242,24 @@ public sealed partial class ChannelsController : ControllerBase
             });
         }
 
-        var mentionNames = MentionRegex()
-            .Matches(content)
-            .Select(x => x.Groups[1].Value.ToUpperInvariant())
-            .Distinct()
-            .Take(20)
-            .ToList();
+        var mentionTokenByNormalized = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match match in MentionRegex().Matches(content))
+        {
+            var mentionToken = match.Value;
+            var normalizedName = match.Groups[1].Value.ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(normalizedName) || mentionTokenByNormalized.ContainsKey(normalizedName))
+            {
+                continue;
+            }
+
+            mentionTokenByNormalized[normalizedName] = mentionToken;
+            if (mentionTokenByNormalized.Count >= 20)
+            {
+                break;
+            }
+        }
+
+        var mentionNames = mentionTokenByNormalized.Keys.ToList();
 
         if (mentionNames.Count > 0)
         {
@@ -174,13 +274,33 @@ public sealed partial class ChannelsController : ControllerBase
             {
                 message.Mentions.Add(new MessageMention
                 {
-                    MentionedUserId = mentioned.Id
+                    MentionedUserId = mentioned.Id,
+                    MentionToken = mentionTokenByNormalized.GetValueOrDefault(
+                        mentioned.NormalizedUsername,
+                        $"@{mentioned.Username}")
                 });
             }
         }
 
         _db.ChannelMessages.Add(message);
-        await _db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException) when (request.ClientMessageId.HasValue)
+        {
+            var existing = await FindByClientMessageIdAsync(
+                channelId,
+                userId,
+                request.ClientMessageId.Value,
+                cancellationToken);
+            if (existing is not null)
+            {
+                return Ok(ToDto(existing));
+            }
+
+            throw;
+        }
 
         await _db.Entry(message).Reference(x => x.User).LoadAsync(cancellationToken);
         await _db.Entry(message).Collection(x => x.Attachments).LoadAsync(cancellationToken);
@@ -215,8 +335,41 @@ public sealed partial class ChannelsController : ControllerBase
                     x.UrlPath))
                 .ToList(),
             message.Mentions
-                .Select(x => new MessageMentionDto(x.MentionedUserId, x.MentionedUser.Username))
+                .Select(x => new MessageMentionDto(
+                    x.MentionedUserId,
+                    x.MentionedUser.Username,
+                    x.MentionToken))
                 .ToList());
+    }
+
+    private async Task<ChannelMessage?> FindByClientMessageIdAsync(
+        Guid channelId,
+        Guid userId,
+        Guid clientMessageId,
+        CancellationToken cancellationToken)
+    {
+        return await _db.ChannelMessages
+            .Where(x =>
+                x.ChannelId == channelId &&
+                x.UserId == userId &&
+                x.ClientMessageId == clientMessageId)
+            .Include(x => x.User)
+            .Include(x => x.Attachments)
+            .Include(x => x.Mentions)
+            .ThenInclude(x => x.MentionedUser)
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
+    private static bool TryParseCursor(string? value, out DateTimeOffset utcDateTime)
+    {
+        if (!DateTimeOffset.TryParse(value, out utcDateTime))
+        {
+            utcDateTime = default;
+            return false;
+        }
+
+        utcDateTime = utcDateTime.ToUniversalTime();
+        return true;
     }
 
     [GeneratedRegex("@([\\p{L}\\p{N}._\\-]{2,32})", RegexOptions.Compiled)]

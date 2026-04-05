@@ -16,6 +16,8 @@ public sealed class ChannelMessage
 
     public AppUser User { get; set; } = null!;
 
+    public Guid? ClientMessageId { get; set; }
+
     public string Content { get; set; } = string.Empty;
 
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;

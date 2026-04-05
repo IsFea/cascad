@@ -9,4 +9,6 @@ public sealed class MessageMention
     public Guid MentionedUserId { get; set; }
 
     public AppUser MentionedUser { get; set; } = null!;
+
+    public string MentionToken { get; set; } = string.Empty;
 }

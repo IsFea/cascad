@@ -190,6 +190,9 @@ public sealed class AppDbContext : DbContext
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Content).HasMaxLength(5000).IsRequired();
             entity.HasIndex(x => new { x.ChannelId, x.CreatedAtUtc });
+            entity.HasIndex(x => new { x.ChannelId, x.UserId, x.ClientMessageId })
+                .IsUnique()
+                .HasFilter("\"ClientMessageId\" IS NOT NULL");
 
             entity.HasOne(x => x.Workspace)
                 .WithMany()
@@ -224,6 +227,7 @@ public sealed class AppDbContext : DbContext
         {
             entity.HasKey(x => new { x.MessageId, x.MentionedUserId });
             entity.HasIndex(x => x.MentionedUserId);
+            entity.Property(x => x.MentionToken).HasMaxLength(64).IsRequired();
 
             entity.HasOne(x => x.Message)
                 .WithMany(x => x.Mentions)

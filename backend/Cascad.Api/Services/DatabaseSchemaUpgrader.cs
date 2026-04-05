@@ -105,6 +105,7 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
                 "WorkspaceId" uuid NOT NULL,
                 "ChannelId" uuid NOT NULL,
                 "UserId" uuid NOT NULL,
+                "ClientMessageId" uuid NULL,
                 "Content" character varying(5000) NOT NULL,
                 "CreatedAtUtc" timestamp with time zone NOT NULL,
                 CONSTRAINT "PK_ChannelMessages" PRIMARY KEY ("Id"),
@@ -128,10 +129,14 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
             CREATE TABLE IF NOT EXISTS "MessageMentions" (
                 "MessageId" uuid NOT NULL,
                 "MentionedUserId" uuid NOT NULL,
+                "MentionToken" character varying(64) NOT NULL,
                 CONSTRAINT "PK_MessageMentions" PRIMARY KEY ("MessageId", "MentionedUserId"),
                 CONSTRAINT "FK_MessageMentions_ChannelMessages_MessageId" FOREIGN KEY ("MessageId") REFERENCES "ChannelMessages" ("Id") ON DELETE CASCADE,
                 CONSTRAINT "FK_MessageMentions_Users_MentionedUserId" FOREIGN KEY ("MentionedUserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
             );
+
+            ALTER TABLE "ChannelMessages" ADD COLUMN IF NOT EXISTS "ClientMessageId" uuid;
+            ALTER TABLE "MessageMentions" ADD COLUMN IF NOT EXISTS "MentionToken" character varying(64) NOT NULL DEFAULT '';
 
             CREATE INDEX IF NOT EXISTS "IX_WorkspaceMembers_UserId" ON "WorkspaceMembers" ("UserId");
             CREATE INDEX IF NOT EXISTS "IX_Channels_WorkspaceId_Position" ON "Channels" ("WorkspaceId", "Position");
@@ -140,6 +145,9 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
             CREATE INDEX IF NOT EXISTS "IX_VoiceModerationStates_UserId" ON "VoiceModerationStates" ("UserId");
             CREATE INDEX IF NOT EXISTS "IX_VoiceStreamPublications_LastSeenAtUtc" ON "VoiceStreamPublications" ("LastSeenAtUtc");
             CREATE INDEX IF NOT EXISTS "IX_ChannelMessages_ChannelId_CreatedAtUtc" ON "ChannelMessages" ("ChannelId", "CreatedAtUtc");
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_ChannelMessages_ChannelId_UserId_ClientMessageId"
+                ON "ChannelMessages" ("ChannelId", "UserId", "ClientMessageId")
+                WHERE "ClientMessageId" IS NOT NULL;
             CREATE INDEX IF NOT EXISTS "IX_MessageAttachments_MessageId" ON "MessageAttachments" ("MessageId");
             CREATE INDEX IF NOT EXISTS "IX_MessageMentions_MentionedUserId" ON "MessageMentions" ("MentionedUserId");
             """,

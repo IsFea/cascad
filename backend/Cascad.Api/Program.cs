@@ -36,6 +36,7 @@ builder.Services.AddScoped<IDatabaseSeeder, DatabaseSeeder>();
 builder.Services.AddScoped<IDatabaseSchemaUpgrader, DatabaseSchemaUpgrader>();
 builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 builder.Services.AddScoped<IVoicePresenceMaintenanceService, VoicePresenceMaintenanceService>();
+builder.Services.AddScoped<IChatMediaStorage, LocalChatMediaStorage>();
 builder.Services.AddHostedService<VoicePresenceCleanupHostedService>();
 
 var voicePresenceOptions = builder.Configuration

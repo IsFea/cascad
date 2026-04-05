@@ -311,8 +311,85 @@ public sealed partial class ChannelsController : ControllerBase
         var dto = ToDto(message);
         await _hubContext.Clients.Group(ChatGroupNames.TextChannel(channelId))
             .SendAsync("textMessage", dto, cancellationToken);
+        await _hubContext.Clients.Group(ChatGroupNames.Workspace(channel.WorkspaceId))
+            .SendAsync("textMessage", dto, cancellationToken);
 
         return StatusCode(StatusCodes.Status201Created, dto);
+    }
+
+    [HttpPost("{channelId:guid}/read")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> MarkChannelRead(
+        Guid channelId,
+        [FromBody] MarkChannelReadRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (!User.TryGetUserId(out var userId))
+        {
+            return Unauthorized();
+        }
+
+        var channel = await _db.Channels
+            .Where(x => x.Id == channelId && !x.IsDeleted)
+            .Select(x => new { x.Id, x.WorkspaceId, x.Type })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (channel is null || channel.Type != ChannelType.Text)
+        {
+            return NotFound();
+        }
+
+        var isMember = await _db.WorkspaceMembers.AnyAsync(
+            x => x.WorkspaceId == channel.WorkspaceId && x.UserId == userId,
+            cancellationToken);
+        if (!isMember)
+        {
+            return Forbid();
+        }
+
+        var normalizedLastReadAtUtc = request.LastReadAtUtc.Kind switch
+        {
+            DateTimeKind.Utc => request.LastReadAtUtc,
+            DateTimeKind.Unspecified => DateTime.SpecifyKind(request.LastReadAtUtc, DateTimeKind.Utc),
+            _ => request.LastReadAtUtc.ToUniversalTime()
+        };
+        if (normalizedLastReadAtUtc < DateTime.UnixEpoch)
+        {
+            normalizedLastReadAtUtc = DateTime.UnixEpoch;
+        }
+
+        var readState = await _db.ChannelReadStates.SingleOrDefaultAsync(
+            x =>
+                x.WorkspaceId == channel.WorkspaceId &&
+                x.ChannelId == channel.Id &&
+                x.UserId == userId,
+            cancellationToken);
+
+        if (readState is null)
+        {
+            readState = new ChannelReadState
+            {
+                WorkspaceId = channel.WorkspaceId,
+                ChannelId = channel.Id,
+                UserId = userId,
+                LastReadAtUtc = normalizedLastReadAtUtc,
+                UpdatedAtUtc = DateTime.UtcNow
+            };
+            _db.ChannelReadStates.Add(readState);
+        }
+        else if (normalizedLastReadAtUtc > readState.LastReadAtUtc)
+        {
+            readState.LastReadAtUtc = normalizedLastReadAtUtc;
+            readState.UpdatedAtUtc = DateTime.UtcNow;
+        }
+        else
+        {
+            readState.UpdatedAtUtc = DateTime.UtcNow;
+        }
+
+        await _db.SaveChangesAsync(cancellationToken);
+        return NoContent();
     }
 
     private static ChannelMessageDto ToDto(ChannelMessage message)

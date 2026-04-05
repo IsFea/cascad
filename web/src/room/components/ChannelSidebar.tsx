@@ -38,9 +38,11 @@ import { initials } from "../utils";
 
 export function ChannelSidebar(props: {
   workspaceName: string;
+  workspaceUnreadCount: number;
   currentUser: UserDto;
   currentAvatarUrl: string | null;
   textChannels: ChannelDto[];
+  textChannelUnreadCounts: Record<string, number>;
   voiceChannels: ChannelDto[];
   members: WorkspaceMemberDto[];
   speakingUserIds: Set<string>;
@@ -101,9 +103,30 @@ export function ChannelSidebar(props: {
       }}
     >
       <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-        <Typography variant="subtitle1" sx={{ fontWeight: 700 }} noWrap>
-          {props.workspaceName}
-        </Typography>
+        <Stack direction="row" spacing={0.7} alignItems="center" sx={{ minWidth: 0 }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }} noWrap>
+            {props.workspaceName}
+          </Typography>
+          {props.workspaceUnreadCount > 0 && (
+            <Box
+              sx={{
+                minWidth: 18,
+                height: 18,
+                px: 0.6,
+                borderRadius: 99,
+                display: "grid",
+                placeItems: "center",
+                bgcolor: "rgba(241, 109, 127, 0.22)",
+                border: "1px solid rgba(241, 109, 127, 0.45)",
+                color: "error.light",
+                fontSize: "0.67rem",
+                fontWeight: 700,
+              }}
+            >
+              {props.workspaceUnreadCount > 99 ? "99+" : props.workspaceUnreadCount}
+            </Box>
+          )}
+        </Stack>
         {props.currentUser.role === "Admin" && (
           <Tooltip title="Server settings">
             <IconButton size="small" aria-label="Server settings" onClick={props.onOpenServerSettings}>
@@ -121,7 +144,7 @@ export function ChannelSidebar(props: {
 
       <Divider sx={{ my: 1 }} />
 
-      <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+      <Box className="app-scrollbar" sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         <Stack
           direction="row"
           alignItems="center"
@@ -353,28 +376,49 @@ export function ChannelSidebar(props: {
           )}
         </Stack>
         <List dense disablePadding>
-          {props.textChannels.map((channel) => (
-            <ListItemButton
-              key={channel.id}
-              selected={props.selectedTextChannelId === channel.id}
-              onClick={() => props.onSelectTextChannel(channel.id)}
-              sx={{
-                borderRadius: 1.2,
-                mb: 0.3,
-                "&.Mui-selected": {
-                  bgcolor: alpha("#6da7ff", 0.12),
-                },
-              }}
-            >
-              <ListItemIcon sx={{ minWidth: 30 }}>
-                {channel.position === 1 ? <ChatBubbleOutlineIcon fontSize="small" /> : <TagIcon fontSize="small" />}
-              </ListItemIcon>
-              <ListItemText
-                primary={channel.name}
-                primaryTypographyProps={{ fontSize: "0.86rem" }}
-              />
-            </ListItemButton>
-          ))}
+          {props.textChannels.map((channel) => {
+            const unreadCount = props.textChannelUnreadCounts[channel.id] ?? 0;
+            return (
+              <ListItemButton
+                key={channel.id}
+                selected={props.selectedTextChannelId === channel.id}
+                onClick={() => props.onSelectTextChannel(channel.id)}
+                sx={{
+                  borderRadius: 1.2,
+                  mb: 0.3,
+                  "&.Mui-selected": {
+                    bgcolor: alpha("#6da7ff", 0.12),
+                  },
+                }}
+              >
+                <ListItemIcon sx={{ minWidth: 30 }}>
+                  {channel.position === 1 ? <ChatBubbleOutlineIcon fontSize="small" /> : <TagIcon fontSize="small" />}
+                </ListItemIcon>
+                <ListItemText
+                  primary={channel.name}
+                  primaryTypographyProps={{ fontSize: "0.86rem" }}
+                />
+                {unreadCount > 0 && (
+                  <Box
+                    sx={{
+                      minWidth: 16,
+                      px: 0.55,
+                      py: 0.12,
+                      borderRadius: 99,
+                      bgcolor: "rgba(241, 109, 127, 0.18)",
+                      border: "1px solid rgba(241, 109, 127, 0.42)",
+                      color: "error.light",
+                      fontWeight: 700,
+                      fontSize: "0.64rem",
+                      lineHeight: 1.2,
+                    }}
+                  >
+                    {unreadCount > 99 ? "99+" : unreadCount}
+                  </Box>
+                )}
+              </ListItemButton>
+            );
+          })}
         </List>
       </Box>
 

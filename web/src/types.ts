@@ -70,6 +70,17 @@ export type WorkspaceMemberDto = {
   isServerDeafened: boolean;
 };
 
+export type ChannelUnreadStateDto = {
+  channelId: string;
+  unreadCount: number;
+  lastReadAtUtc: string | null;
+};
+
+export type ChatUnreadDto = {
+  totalUnreadCount: number;
+  channels: ChannelUnreadStateDto[];
+};
+
 export type WorkspaceBootstrapResponse = {
   workspace: WorkspaceDto;
   currentUser: UserDto;
@@ -77,6 +88,7 @@ export type WorkspaceBootstrapResponse = {
   connectedVoiceTabInstanceId: string | null;
   channels: ChannelDto[];
   members: WorkspaceMemberDto[];
+  chatUnread: ChatUnreadDto;
 };
 
 export type MessageAttachmentDto = {

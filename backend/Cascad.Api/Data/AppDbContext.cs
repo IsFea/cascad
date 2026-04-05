@@ -32,6 +32,8 @@ public sealed class AppDbContext : DbContext
 
     public DbSet<ChannelMessage> ChannelMessages => Set<ChannelMessage>();
 
+    public DbSet<ChannelReadState> ChannelReadStates => Set<ChannelReadState>();
+
     public DbSet<MessageAttachment> MessageAttachments => Set<MessageAttachment>();
 
     public DbSet<MessageMention> MessageMentions => Set<MessageMention>();
@@ -206,6 +208,28 @@ public sealed class AppDbContext : DbContext
 
             entity.HasOne(x => x.User)
                 .WithMany(x => x.Messages)
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ChannelReadState>(entity =>
+        {
+            entity.HasKey(x => new { x.WorkspaceId, x.ChannelId, x.UserId });
+            entity.HasIndex(x => new { x.UserId, x.WorkspaceId });
+            entity.HasIndex(x => new { x.ChannelId, x.UserId });
+
+            entity.HasOne(x => x.Workspace)
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(x => x.Channel)
+                .WithMany()
+                .HasForeignKey(x => x.ChannelId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(x => x.User)
+                .WithMany()
                 .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });

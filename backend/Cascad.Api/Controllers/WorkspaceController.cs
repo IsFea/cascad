@@ -110,6 +110,56 @@ public sealed class WorkspaceController : ControllerBase
                 g => g.Key,
                 g => g.OrderByDescending(v => v.LastSeenAtUtc).First());
 
+        var textChannelIds = channels
+            .Where(x => x.Type == ChannelType.Text)
+            .Select(x => x.Id)
+            .ToList();
+
+        var readStates = textChannelIds.Count == 0
+            ? new List<ChannelReadState>()
+            : await _db.ChannelReadStates
+                .Where(x =>
+                    x.WorkspaceId == workspace.Id &&
+                    x.UserId == user.Id &&
+                    textChannelIds.Contains(x.ChannelId))
+                .ToListAsync(cancellationToken);
+
+        var lastReadByChannel = readStates
+            .ToDictionary(x => x.ChannelId, x => x.LastReadAtUtc);
+
+        var unreadRows = textChannelIds.Count == 0
+            ? new List<(Guid ChannelId, int UnreadCount)>()
+            : (await (
+                from message in _db.ChannelMessages
+                join readState in _db.ChannelReadStates
+                        .Where(x => x.WorkspaceId == workspace.Id && x.UserId == user.Id)
+                    on message.ChannelId equals readState.ChannelId into readStateGroup
+                from readState in readStateGroup.DefaultIfEmpty()
+                where textChannelIds.Contains(message.ChannelId)
+                      && message.UserId != user.Id
+                      && (readState == null || message.CreatedAtUtc > readState.LastReadAtUtc)
+                group message by message.ChannelId
+                into grouped
+                select new
+                {
+                    grouped.Key,
+                    UnreadCount = grouped.Count()
+                })
+                .ToListAsync(cancellationToken))
+            .Select(x => (ChannelId: x.Key, UnreadCount: x.UnreadCount))
+            .ToList();
+
+        var unreadCountByChannel = unreadRows.ToDictionary(x => x.ChannelId, x => x.UnreadCount);
+        var unreadChannels = textChannelIds
+            .Select(channelId => new ChannelUnreadStateDto(
+                channelId,
+                unreadCountByChannel.GetValueOrDefault(channelId, 0),
+                lastReadByChannel.GetValueOrDefault(channelId)))
+            .ToList();
+        var chatUnread = new ChatUnreadDto(
+            unreadChannels.Sum(x => x.UnreadCount),
+            unreadChannels);
+
         var response = new WorkspaceBootstrapResponse(
             new WorkspaceDto(workspace.Id, workspace.Name, workspace.CreatedAtUtc),
             ToUserDto(user),
@@ -142,7 +192,8 @@ public sealed class WorkspaceController : ControllerBase
                 })
                 .OrderByDescending(x => x.Role)
                 .ThenBy(x => x.Username)
-                .ToList());
+                .ToList(),
+            chatUnread);
 
         return Ok(response);
     }

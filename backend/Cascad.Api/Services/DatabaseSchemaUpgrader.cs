@@ -114,6 +114,18 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
                 CONSTRAINT "FK_ChannelMessages_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS "ChannelReadStates" (
+                "WorkspaceId" uuid NOT NULL,
+                "ChannelId" uuid NOT NULL,
+                "UserId" uuid NOT NULL,
+                "LastReadAtUtc" timestamp with time zone NOT NULL,
+                "UpdatedAtUtc" timestamp with time zone NOT NULL,
+                CONSTRAINT "PK_ChannelReadStates" PRIMARY KEY ("WorkspaceId", "ChannelId", "UserId"),
+                CONSTRAINT "FK_ChannelReadStates_Workspaces_WorkspaceId" FOREIGN KEY ("WorkspaceId") REFERENCES "Workspaces" ("Id") ON DELETE CASCADE,
+                CONSTRAINT "FK_ChannelReadStates_Channels_ChannelId" FOREIGN KEY ("ChannelId") REFERENCES "Channels" ("Id") ON DELETE CASCADE,
+                CONSTRAINT "FK_ChannelReadStates_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS "MessageAttachments" (
                 "Id" uuid NOT NULL,
                 "MessageId" uuid NOT NULL,
@@ -148,6 +160,8 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
             CREATE UNIQUE INDEX IF NOT EXISTS "IX_ChannelMessages_ChannelId_UserId_ClientMessageId"
                 ON "ChannelMessages" ("ChannelId", "UserId", "ClientMessageId")
                 WHERE "ClientMessageId" IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS "IX_ChannelReadStates_UserId_WorkspaceId" ON "ChannelReadStates" ("UserId", "WorkspaceId");
+            CREATE INDEX IF NOT EXISTS "IX_ChannelReadStates_ChannelId_UserId" ON "ChannelReadStates" ("ChannelId", "UserId");
             CREATE INDEX IF NOT EXISTS "IX_MessageAttachments_MessageId" ON "MessageAttachments" ("MessageId");
             CREATE INDEX IF NOT EXISTS "IX_MessageMentions_MentionedUserId" ON "MessageMentions" ("MentionedUserId");
             """,

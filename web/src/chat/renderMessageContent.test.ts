@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tokenizeMessageContent } from "./renderMessageContent";
+import { tokenizeMessageContent, renderMessageContent } from "./renderMessageContent";
 
 describe("tokenizeMessageContent", () => {
   it("marks only server-validated mention tokens as mentions", () => {
@@ -24,5 +24,15 @@ describe("tokenizeMessageContent", () => {
       { kind: "link", value: "https://example.com", href: "https://example.com/" },
       { kind: "text", value: " and javascript://alert(1)" },
     ]);
+  });
+
+  it("marks current-user mention with alert styling", () => {
+    const nodes = renderMessageContent(
+      "hi @alice",
+      [{ userId: "u-1", username: "alice", token: "@alice" }],
+      "u-1",
+    );
+
+    expect(nodes).toHaveLength(2);
   });
 });

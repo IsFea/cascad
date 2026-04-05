@@ -74,24 +74,37 @@ export function tokenizeMessageContent(
   return parts;
 }
 
-export function renderMessageContent(content: string, mentions: readonly MessageMentionDto[]) {
+export function renderMessageContent(
+  content: string,
+  mentions: readonly MessageMentionDto[],
+  currentUserId?: string,
+) {
   const mentionTokens = mentions.map((mention) => mention.token);
+  const mentionByToken = new Map<string, MessageMentionDto>();
+  for (const mention of mentions) {
+    mentionByToken.set(mention.token, mention);
+  }
   const tokens = tokenizeMessageContent(content, mentionTokens);
 
   return tokens.map((token, index) => {
     if (token.kind === "mention") {
+      const isCurrentUserMention = currentUserId
+        ? mentionByToken.get(token.value)?.userId === currentUserId
+        : false;
       return (
         <Box
           key={`${token.value}-${index}`}
           component="span"
           sx={{
-            color: "primary.light",
+            color: isCurrentUserMention ? "error.light" : "primary.light",
             fontWeight: 600,
             px: 0.55,
             py: 0.12,
             borderRadius: 0.6,
-            bgcolor: "rgba(110, 164, 255, 0.14)",
-            border: "1px solid rgba(110, 164, 255, 0.28)",
+            bgcolor: isCurrentUserMention ? "rgba(241, 109, 127, 0.18)" : "rgba(110, 164, 255, 0.14)",
+            border: isCurrentUserMention
+              ? "1px solid rgba(241, 109, 127, 0.38)"
+              : "1px solid rgba(110, 164, 255, 0.28)",
           }}
         >
           {token.value}

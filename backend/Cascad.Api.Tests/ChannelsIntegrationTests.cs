@@ -89,6 +89,62 @@ public sealed class ChannelsIntegrationTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
+    public async Task JoinWorkspace_ShouldReceiveTextMessages_WithoutJoiningTextChannel()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        await RegisterAndApproveAsync(adminClient, "workspacewatcher");
+        var watcherClient = _factory.CreateClient();
+        var watcherToken = await LoginAsync(watcherClient, "workspacewatcher", "workspacewatcher12345");
+        watcherClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", watcherToken);
+
+        var watcherWorkspace = await watcherClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(watcherWorkspace);
+        var workspaceId = watcherWorkspace!.Workspace.Id;
+        var textChannel = watcherWorkspace.Channels.First(x => x.Type == ChannelType.Text);
+
+        var watcherEvents = System.Threading.Channels.Channel.CreateUnbounded<ChannelMessageDto>();
+        var watcherHub = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(watcherToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+        watcherHub.On<ChannelMessageDto>("textMessage", payload => watcherEvents.Writer.TryWrite(payload));
+
+        await watcherHub.StartAsync();
+        try
+        {
+            await watcherHub.InvokeAsync("JoinWorkspace", workspaceId);
+
+            var sendResponse = await adminClient.PostAsJsonAsync(
+                $"/api/channels/{textChannel.Id}/messages",
+                new CreateChannelMessageRequest
+                {
+                    Content = "workspace-broadcast-check"
+                });
+            sendResponse.EnsureSuccessStatusCode();
+
+            var delivered = await TryWaitForTextMessageAsync(
+                watcherEvents.Reader,
+                x => x.ChannelId == textChannel.Id && x.Content.Contains("workspace-broadcast-check", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            Assert.NotNull(delivered);
+        }
+        finally
+        {
+            await watcherHub.StopAsync();
+            await watcherHub.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task CreateMessage_ShouldBeIdempotent_WhenClientMessageIdIsReused()
     {
         var client = _factory.CreateClient();
@@ -202,6 +258,80 @@ public sealed class ChannelsIntegrationTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull(updates);
         Assert.DoesNotContain(updates!.Messages, x => x.Id == first.Id);
         Assert.Contains(updates.Messages, x => x.Id == second!.Id);
+    }
+
+    [Fact]
+    public async Task WorkspaceUnread_ShouldReflectNewMessages_AndResetAfterRead()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await RegisterAndApproveAsync(adminClient, "chatreader");
+
+        var readerClient = _factory.CreateClient();
+        var readerToken = await LoginAsync(readerClient, "chatreader", "chatreader12345");
+        readerClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", readerToken);
+
+        var before = await readerClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(before);
+        var textChannel = before!.Channels.First(x => x.Type == ChannelType.Text);
+        var baselineUnread = before.ChatUnread.Channels
+            .SingleOrDefault(x => x.ChannelId == textChannel.Id)?
+            .UnreadCount ?? 0;
+
+        var firstSend = await adminClient.PostAsJsonAsync(
+            $"/api/channels/{textChannel.Id}/messages",
+            new CreateChannelMessageRequest { Content = "reader-unread-1" });
+        firstSend.EnsureSuccessStatusCode();
+
+        await Task.Delay(15);
+
+        var secondSend = await adminClient.PostAsJsonAsync(
+            $"/api/channels/{textChannel.Id}/messages",
+            new CreateChannelMessageRequest { Content = "reader-unread-2" });
+        secondSend.EnsureSuccessStatusCode();
+        var secondMessage = await secondSend.Content.ReadFromJsonAsync<ChannelMessageDto>(JsonOptions);
+        Assert.NotNull(secondMessage);
+
+        var after = await readerClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(after);
+        var unreadInChannel = after!.ChatUnread.Channels
+            .SingleOrDefault(x => x.ChannelId == textChannel.Id)?
+            .UnreadCount ?? 0;
+        Assert.True(unreadInChannel >= baselineUnread + 2);
+        Assert.True(after.ChatUnread.TotalUnreadCount >= unreadInChannel);
+
+        var markReadResponse = await readerClient.PostAsJsonAsync(
+            $"/api/channels/{textChannel.Id}/read",
+            new MarkChannelReadRequest(secondMessage!.CreatedAtUtc));
+        Assert.Equal(HttpStatusCode.NoContent, markReadResponse.StatusCode);
+
+        var afterRead = await readerClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(afterRead);
+        var unreadAfterRead = afterRead!.ChatUnread.Channels
+            .SingleOrDefault(x => x.ChannelId == textChannel.Id)?
+            .UnreadCount ?? 0;
+        Assert.Equal(0, unreadAfterRead);
+    }
+
+    [Fact]
+    public async Task MarkChannelRead_ShouldReturnForbid_ForNonMember()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        await RegisterAndApproveAsync(adminClient, "readoutsider");
+        var outsiderClient = _factory.CreateClient();
+        var outsiderToken = await LoginAsync(outsiderClient, "readoutsider", "readoutsider12345");
+        outsiderClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", outsiderToken);
+
+        var (_, channelId) = await CreatePrivateTextChannelForAdminAsync();
+
+        var response = await outsiderClient.PostAsJsonAsync(
+            $"/api/channels/{channelId}/read",
+            new MarkChannelReadRequest(DateTime.UtcNow));
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     private async Task<(Guid workspaceId, Guid channelId)> CreatePrivateTextChannelForAdminAsync()

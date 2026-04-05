@@ -8,4 +8,5 @@ public sealed record WorkspaceBootstrapResponse(
     Guid? ConnectedVoiceChannelId,
     string? ConnectedVoiceTabInstanceId,
     IReadOnlyList<ChannelDto> Channels,
-    IReadOnlyList<WorkspaceMemberDto> Members);
+    IReadOnlyList<WorkspaceMemberDto> Members,
+    ChatUnreadDto ChatUnread);

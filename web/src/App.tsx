@@ -1,7 +1,6 @@
 import {
   Alert,
   Avatar,
-  Badge,
   Box,
   Button,
   CircularProgress,
@@ -16,6 +15,8 @@ import {
   List,
   ListItemButton,
   ListItemText,
+  Menu,
+  MenuItem,
   Paper,
   Popover,
   Slider,
@@ -30,11 +31,13 @@ import {
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import AddReactionIcon from "@mui/icons-material/AddReaction";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
 import CloseIcon from "@mui/icons-material/Close";
-import LogoutIcon from "@mui/icons-material/Logout";
+import ImageIcon from "@mui/icons-material/Image";
+import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
 import SendIcon from "@mui/icons-material/Send";
 import { HubConnection, HubConnectionBuilder, HubConnectionState, LogLevel } from "@microsoft/signalr";
-import { ClipboardEvent as ReactClipboardEvent, FormEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent as ReactClipboardEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EmbeddedVoiceControls,
   EmbeddedVoiceStage,
@@ -86,6 +89,17 @@ import { useChatState } from "./chat/useChatState";
 import { buildMessageTimeline } from "./chat/messageTimeline";
 import { formatFullMessageTime, formatRelativeMessageTime } from "./chat/timestamps";
 import { appendAttachmentUrl, extractImageFilesFromClipboardItems, removeAttachmentUrl } from "./chat/composerAttachments";
+import {
+  ChatViewStateMap,
+  getChannelChatViewState,
+  getWorkspaceUnreadCount,
+  incrementChannelUnread,
+  markChannelRead,
+  parseChatViewState,
+  setChannelIsAtBottom,
+  syncChatViewStateFromServer,
+  stringifyChatViewState,
+} from "./chat/viewState";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
 const TOKEN_KEY = "cascad_app_token";
@@ -100,6 +114,9 @@ const SIGNALR_CLIENT_KEEPALIVE_MS = 5000;
 const SIGNALR_SERVER_TIMEOUT_MS = 30000;
 const SIGNALR_LOG_LEVEL = LogLevel.None;
 const EARCON_VOLUME_MULTIPLIER = 8.4;
+const CHAT_EARCON_VOLUME_MULTIPLIER = 10.6;
+const CHAT_MESSAGE_EARCON_COOLDOWN_MS = 750;
+const CHAT_MENTION_EARCON_COOLDOWN_MS = 1000;
 const EARCON_GAIN_BOOST: Record<VoiceEarconType, number> = {
   join: 1.65,
   leave: 1.65,
@@ -116,6 +133,15 @@ type EarconProfile = {
   gapMs: number;
   gain: number;
   tailMs: number;
+};
+
+type ChatEarconType = "message" | "mention";
+
+type ChatEarconProfile = {
+  frequencies: number[];
+  noteMs: number;
+  gapMs: number;
+  gain: number;
 };
 
 const EARCON_PROFILES: Record<VoiceEarconType, EarconProfile> = {
@@ -153,6 +179,21 @@ const EARCON_PROFILES: Record<VoiceEarconType, EarconProfile> = {
     gapMs: 20,
     gain: 0.018,
     tailMs: 55,
+  },
+};
+
+const CHAT_EARCON_PROFILES: Record<ChatEarconType, ChatEarconProfile> = {
+  message: {
+    frequencies: [360],
+    noteMs: 66,
+    gapMs: 0,
+    gain: 0.021,
+  },
+  mention: {
+    frequencies: [430, 520],
+    noteMs: 62,
+    gapMs: 28,
+    gain: 0.023,
   },
 };
 
@@ -380,6 +421,56 @@ async function playVoiceEarcon(context: AudioContext, type: VoiceEarconType) {
   const totalGapDuration = Math.max(0, notesCount - 1) * gapSec;
   const endTime = baseTime + totalNotesDuration + totalGapDuration + profile.tailMs / 1000;
   masterGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
+}
+
+function scheduleChatEarconNote(
+  context: AudioContext,
+  destination: AudioNode,
+  startAt: number,
+  frequency: number,
+  durationSec: number,
+) {
+  const oscillator = context.createOscillator();
+  oscillator.type = "triangle";
+  oscillator.frequency.setValueAtTime(frequency, startAt);
+
+  const noteGain = context.createGain();
+  noteGain.gain.setValueAtTime(0.0001, startAt);
+  noteGain.gain.exponentialRampToValueAtTime(1, startAt + 0.008);
+  noteGain.gain.exponentialRampToValueAtTime(0.0001, startAt + Math.max(durationSec - 0.02, 0.014));
+
+  oscillator.connect(noteGain);
+  noteGain.connect(destination);
+  oscillator.start(startAt);
+  oscillator.stop(startAt + durationSec);
+}
+
+async function playChatEarcon(context: AudioContext, type: ChatEarconType) {
+  try {
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+  } catch {
+    return;
+  }
+
+  if (context.state !== "running") {
+    return;
+  }
+
+  const profile = CHAT_EARCON_PROFILES[type];
+  const baseTime = context.currentTime + 0.002;
+  const noteDurationSec = profile.noteMs / 1000;
+  const gapSec = profile.gapMs / 1000;
+
+  const masterGain = context.createGain();
+  masterGain.gain.setValueAtTime(profile.gain * CHAT_EARCON_VOLUME_MULTIPLIER, baseTime);
+  masterGain.connect(context.destination);
+
+  profile.frequencies.forEach((frequency, index) => {
+    const offset = index * (noteDurationSec + gapSec);
+    scheduleChatEarconNote(context, masterGain, baseTime + offset, frequency, noteDurationSec);
+  });
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -640,6 +731,7 @@ function WorkspaceShell(props: {
   const [attachments, setAttachments] = useState<string[]>([]);
   const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidateDto[]>([]);
+  const [attachmentMenuAnchorEl, setAttachmentMenuAnchorEl] = useState<HTMLElement | null>(null);
   const [imageLightbox, setImageLightbox] = useState<{
     attachments: MessageAttachmentDto[];
     index: number;
@@ -650,6 +742,7 @@ function WorkspaceShell(props: {
   >([]);
   const { messagesByChannel, replaceChannelMessages, upsertChannelMessage, upsertChannelMessages } =
     useChatState();
+  const [chatViewState, setChatViewState] = useState<ChatViewStateMap>({});
 
   const [selfMuted, setSelfMuted] = useState(false);
   const [selfDeafened, setSelfDeafened] = useState(false);
@@ -676,6 +769,9 @@ function WorkspaceShell(props: {
   const [participantMenuRequest, setParticipantMenuRequest] = useState<ParticipantMenuRequest | null>(null);
 
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const attachPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const messageInputRef = useRef<HTMLInputElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const hubRef = useRef<HubConnection | null>(null);
   const participantMenuSeqRef = useRef(1);
   const voiceEarconContextRef = useRef<AudioContext | null>(null);
@@ -684,6 +780,7 @@ function WorkspaceShell(props: {
   const previousConnectedVoiceChannelIdRef = useRef<string | null>(null);
   const previousVoiceEngineConnectedRef = useRef(false);
   const selectedTextChannelIdRef = useRef<string | null>(null);
+  const centerModeRef = useRef<"text" | "voice">("text");
   const connectedVoiceChannelIdRef = useRef<string | null>(null);
   const voiceSessionRef = useRef<JoinRoomResponse | null>(null);
   const suppressWorkspaceVoiceSyncRef = useRef(false);
@@ -699,6 +796,13 @@ function WorkspaceShell(props: {
   const joinedVoiceChannelIdRef = useRef<string | null>(null);
   const mentionFetchSeqRef = useRef(0);
   const chatMessagesByChannelRef = useRef<Record<string, ChannelMessageDto[]>>({});
+  const chatViewStateRef = useRef<ChatViewStateMap>({});
+  const pendingScrollToBottomChannelRef = useRef<string | null>(null);
+  const lastRenderedMessageIdByChannelRef = useRef<Record<string, string>>({});
+  const pendingReadSyncByChannelRef = useRef<Record<string, string>>({});
+  const pendingReadSyncTimerByChannelRef = useRef<Record<string, number>>({});
+  const lastChatMessageEarconAtRef = useRef(-Infinity);
+  const lastChatMentionEarconAtRef = useRef(-Infinity);
   const tabInstanceId = useMemo(() => {
     const existing = sessionStorage.getItem(VOICE_TAB_INSTANCE_KEY);
     if (existing) {
@@ -711,6 +815,10 @@ function WorkspaceShell(props: {
   }, []);
   const workspaceId = workspaceData?.workspace.id ?? null;
   const isCurrentUserAdmin = props.currentUser.role === "Admin";
+  const chatStorageKey = useMemo(
+    () => (workspaceId ? `chat:${props.currentUser.id}:${workspaceId}` : null),
+    [props.currentUser.id, workspaceId],
+  );
 
   useEffect(() => {
     setCurrentAvatarUrl(props.currentUser.avatarUrl);
@@ -718,10 +826,11 @@ function WorkspaceShell(props: {
 
   useEffect(() => {
     selectedTextChannelIdRef.current = selectedTextChannelId;
+    centerModeRef.current = centerMode;
     connectedVoiceChannelIdRef.current = connectedVoiceChannelId;
     workspaceIdRef.current = workspaceId;
     currentUserIdRef.current = props.currentUser.id;
-  }, [selectedTextChannelId, connectedVoiceChannelId, workspaceId, props.currentUser.id]);
+  }, [centerMode, selectedTextChannelId, connectedVoiceChannelId, workspaceId, props.currentUser.id]);
 
   useEffect(() => {
     voiceSessionRef.current = voiceSession;
@@ -744,6 +853,16 @@ function WorkspaceShell(props: {
       }
       void context.close().catch(() => undefined);
       voiceEarconContextRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const timeoutId of Object.values(pendingReadSyncTimerByChannelRef.current)) {
+        window.clearTimeout(timeoutId);
+      }
+      pendingReadSyncTimerByChannelRef.current = {};
+      pendingReadSyncByChannelRef.current = {};
     };
   }, []);
 
@@ -815,6 +934,42 @@ function WorkspaceShell(props: {
 
     return messagesByChannel[selectedTextChannelId] ?? [];
   }, [messagesByChannel, selectedTextChannelId]);
+  const selectedChannelView = useMemo(
+    () => getChannelChatViewState(chatViewState, selectedTextChannelId),
+    [chatViewState, selectedTextChannelId],
+  );
+  const textChannelUnreadCounts = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const channel of textChannels) {
+      map[channel.id] = getChannelChatViewState(chatViewState, channel.id).unreadCount;
+    }
+    return map;
+  }, [chatViewState, textChannels]);
+  const workspaceUnreadCount = useMemo(
+    () => getWorkspaceUnreadCount(chatViewState),
+    [chatViewState],
+  );
+  const firstUnreadMessageIdInSelectedChannel = useMemo(() => {
+    if (!selectedTextChannelId || selectedChannelView.unreadCount <= 0) {
+      return null;
+    }
+
+    const lastReadAtMs = selectedChannelView.lastReadAtUtc
+      ? Date.parse(selectedChannelView.lastReadAtUtc)
+      : Number.NEGATIVE_INFINITY;
+
+    for (const message of selectedChannelMessages) {
+      if (message.userId === props.currentUser.id) {
+        continue;
+      }
+
+      if (Date.parse(message.createdAtUtc) > lastReadAtMs) {
+        return message.id;
+      }
+    }
+
+    return selectedChannelView.firstUnreadMessageId;
+  }, [props.currentUser.id, selectedChannelMessages, selectedChannelView.firstUnreadMessageId, selectedChannelView.lastReadAtUtc, selectedChannelView.unreadCount, selectedTextChannelId]);
   const [timelineNowMs, setTimelineNowMs] = useState(() => Date.now());
 
   const messageTimeline = useMemo(
@@ -837,6 +992,27 @@ function WorkspaceShell(props: {
   useEffect(() => {
     chatMessagesByChannelRef.current = messagesByChannel;
   }, [messagesByChannel]);
+
+  useEffect(() => {
+    chatViewStateRef.current = chatViewState;
+  }, [chatViewState]);
+
+  useEffect(() => {
+    if (!chatStorageKey) {
+      setChatViewState({});
+      return;
+    }
+
+    setChatViewState(parseChatViewState(localStorage.getItem(chatStorageKey)));
+  }, [chatStorageKey]);
+
+  useEffect(() => {
+    if (!chatStorageKey) {
+      return;
+    }
+
+    localStorage.setItem(chatStorageKey, stringifyChatViewState(chatViewState));
+  }, [chatStorageKey, chatViewState]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -955,6 +1131,7 @@ function WorkspaceShell(props: {
   const loadWorkspace = useCallback(async () => {
     const data = await apiCall<WorkspaceBootstrapResponse>("/workspace", "GET", undefined, props.token);
     setWorkspaceData(data);
+    setChatViewState((current) => syncChatViewStateFromServer(current, data.chatUnread.channels));
 
     const firstText = data.channels.find((x) => x.type === "Text")?.id ?? null;
     const firstVoice = data.channels.find((x) => x.type === "Voice")?.id ?? null;
@@ -1059,6 +1236,113 @@ function WorkspaceShell(props: {
 
     await loadMessageUpdates(channelId, latestCursor);
   }, [loadMessageUpdates, loadRecentMessages]);
+
+  const isNearBottom = (element: HTMLDivElement, thresholdPx = 40) => {
+    return element.scrollHeight - element.scrollTop - element.clientHeight <= thresholdPx;
+  };
+
+  const scrollActiveChatToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const element = messageListRef.current;
+    if (!element) {
+      return;
+    }
+
+    element.scrollTo({
+      top: element.scrollHeight,
+      behavior,
+    });
+  }, []);
+
+  const isPageFocused = () => document.visibilityState === "visible" && document.hasFocus();
+
+  const isReadEligible = useCallback((channelId: string, isAtBottom: boolean) => {
+    if (!isAtBottom) {
+      return false;
+    }
+
+    if (centerModeRef.current !== "text") {
+      return false;
+    }
+
+    if (selectedTextChannelIdRef.current !== channelId) {
+      return false;
+    }
+
+    return isPageFocused();
+  }, []);
+
+  const markChannelAsRead = useCallback((channelId: string, lastReadAtUtc: string) => {
+    setChatViewState((current) => markChannelRead(current, channelId, lastReadAtUtc));
+
+    const currentPendingRead = pendingReadSyncByChannelRef.current[channelId];
+    if (
+      currentPendingRead &&
+      Number.isFinite(Date.parse(currentPendingRead)) &&
+      Date.parse(currentPendingRead) >= Date.parse(lastReadAtUtc)
+    ) {
+      return;
+    }
+    pendingReadSyncByChannelRef.current[channelId] = lastReadAtUtc;
+
+    const existingTimeout = pendingReadSyncTimerByChannelRef.current[channelId];
+    if (existingTimeout) {
+      window.clearTimeout(existingTimeout);
+    }
+
+    pendingReadSyncTimerByChannelRef.current[channelId] = window.setTimeout(() => {
+      delete pendingReadSyncTimerByChannelRef.current[channelId];
+      const queuedReadAtUtc = pendingReadSyncByChannelRef.current[channelId];
+      if (!queuedReadAtUtc) {
+        return;
+      }
+
+      void apiCall<void>(
+        `/channels/${channelId}/read`,
+        "POST",
+        { lastReadAtUtc: queuedReadAtUtc },
+        props.token,
+      )
+        .then(() => {
+          if (pendingReadSyncByChannelRef.current[channelId] === queuedReadAtUtc) {
+            delete pendingReadSyncByChannelRef.current[channelId];
+          }
+        })
+        .catch(() => undefined);
+    }, 420);
+  }, [props.token]);
+
+  const tryPlayChatEarcon = (type: ChatEarconType) => {
+    const nowMs = performance.now();
+    if (type === "mention") {
+      if (nowMs - lastChatMentionEarconAtRef.current < CHAT_MENTION_EARCON_COOLDOWN_MS) {
+        return;
+      }
+      lastChatMentionEarconAtRef.current = nowMs;
+    } else {
+      if (nowMs - lastChatMessageEarconAtRef.current < CHAT_MESSAGE_EARCON_COOLDOWN_MS) {
+        return;
+      }
+      lastChatMessageEarconAtRef.current = nowMs;
+    }
+
+    let context = voiceEarconContextRef.current;
+    if (!context) {
+      const Ctor = getAudioContextConstructor();
+      if (!Ctor) {
+        return;
+      }
+
+      try {
+        context = new Ctor();
+      } catch {
+        return;
+      }
+
+      voiceEarconContextRef.current = context;
+    }
+
+    void playChatEarcon(context, type).catch(() => undefined);
+  };
 
   const tryPlayVoiceEarcon = (type: VoiceEarconType) => {
     const nowMs = performance.now();
@@ -1252,10 +1536,90 @@ function WorkspaceShell(props: {
       return;
     }
 
+    pendingScrollToBottomChannelRef.current = selectedTextChannelId;
+    setChatViewState((current) => setChannelIsAtBottom(current, selectedTextChannelId, true));
+
     void syncMessagesForChannel(selectedTextChannelId).catch((reason) => {
       setError(reason instanceof Error ? reason.message : "Failed to load messages");
     });
   }, [selectedTextChannelId, syncMessagesForChannel]);
+
+  useEffect(() => {
+    if (!selectedTextChannelId || selectedChannelMessages.length === 0) {
+      return;
+    }
+
+    const lastMessage = selectedChannelMessages[selectedChannelMessages.length - 1];
+    if (!lastMessage) {
+      return;
+    }
+
+    const lastRenderedMessageId = lastRenderedMessageIdByChannelRef.current[selectedTextChannelId];
+    const shouldForceScroll = pendingScrollToBottomChannelRef.current === selectedTextChannelId;
+    const channelState = getChannelChatViewState(chatViewStateRef.current, selectedTextChannelId);
+    const shouldStickToBottom = shouldForceScroll || channelState.isAtBottom;
+    const hasNewMessage = lastRenderedMessageId !== lastMessage.id;
+
+    if (hasNewMessage && shouldStickToBottom) {
+      requestAnimationFrame(() => {
+        scrollActiveChatToBottom("auto");
+      });
+      if (isReadEligible(selectedTextChannelId, true)) {
+        markChannelAsRead(selectedTextChannelId, lastMessage.createdAtUtc);
+      }
+      pendingScrollToBottomChannelRef.current = null;
+    }
+
+    lastRenderedMessageIdByChannelRef.current[selectedTextChannelId] = lastMessage.id;
+  }, [isReadEligible, markChannelAsRead, scrollActiveChatToBottom, selectedChannelMessages, selectedTextChannelId]);
+
+  useEffect(() => {
+    if (!selectedTextChannelId || selectedChannelMessages.length === 0) {
+      return;
+    }
+
+    if (!isReadEligible(selectedTextChannelId, selectedChannelView.isAtBottom)) {
+      return;
+    }
+
+    const lastMessage = selectedChannelMessages[selectedChannelMessages.length - 1];
+    if (!lastMessage) {
+      return;
+    }
+
+    markChannelAsRead(selectedTextChannelId, lastMessage.createdAtUtc);
+  }, [isReadEligible, markChannelAsRead, selectedChannelMessages, selectedChannelView.isAtBottom, selectedTextChannelId]);
+
+  useEffect(() => {
+    const flushReadIfEligible = () => {
+      const activeChannelId = selectedTextChannelIdRef.current;
+      if (!activeChannelId) {
+        return;
+      }
+
+      const channelState = getChannelChatViewState(chatViewStateRef.current, activeChannelId);
+      if (!isReadEligible(activeChannelId, channelState.isAtBottom)) {
+        return;
+      }
+
+      const messages = chatMessagesByChannelRef.current[activeChannelId] ?? [];
+      const lastMessage = messages[messages.length - 1];
+      if (!lastMessage) {
+        return;
+      }
+
+      markChannelAsRead(activeChannelId, lastMessage.createdAtUtc);
+    };
+
+    flushReadIfEligible();
+    window.addEventListener("focus", flushReadIfEligible);
+    document.addEventListener("visibilitychange", flushReadIfEligible);
+
+    return () => {
+      window.removeEventListener("focus", flushReadIfEligible);
+      document.removeEventListener("visibilitychange", flushReadIfEligible);
+    };
+  }, [centerMode, isReadEligible, markChannelAsRead, selectedTextChannelId]);
 
   useEffect(() => {
     setMentionQuery(findTrailingMentionQuery(messageDraft));
@@ -1471,7 +1835,40 @@ function WorkspaceShell(props: {
     joinedVoiceChannelIdRef.current = null;
 
     hub.on("textMessage", (message: ChannelMessageDto) => {
+      const existingMessages = chatMessagesByChannelRef.current[message.channelId] ?? [];
+      const wasKnownMessage = existingMessages.some((item) => item.id === message.id);
       upsertChannelMessage(message.channelId, message);
+      if (wasKnownMessage) {
+        return;
+      }
+
+      const isOwnMessage = message.userId === currentUserIdRef.current;
+      const isMentioningCurrentUser = message.mentions.some(
+        (mention) => mention.userId === currentUserIdRef.current,
+      );
+      const channelView = getChannelChatViewState(chatViewStateRef.current, message.channelId);
+      const isCurrentlyReadable = isReadEligible(message.channelId, channelView.isAtBottom);
+      const shouldMarkUnread = !isOwnMessage && !isCurrentlyReadable;
+
+      if (shouldMarkUnread) {
+        setChatViewState((current) => incrementChannelUnread(current, message.channelId, message.id));
+      } else if (!isOwnMessage && isCurrentlyReadable) {
+        markChannelAsRead(message.channelId, message.createdAtUtc);
+      }
+
+      if (isOwnMessage) {
+        return;
+      }
+
+      if (isMentioningCurrentUser) {
+        tryPlayChatEarcon("mention");
+        return;
+      }
+
+      const shouldPlayMessageSound = !isCurrentlyReadable;
+      if (shouldPlayMessageSound) {
+        tryPlayChatEarcon("message");
+      }
     });
 
     hub.on(
@@ -1635,7 +2032,7 @@ function WorkspaceShell(props: {
       joinedVoiceChannelIdRef.current = null;
       void hub.stop();
     };
-  }, [loadWorkspace, props.token, syncHubGroups, syncMessagesForChannel, upsertChannelMessage]);
+  }, [isReadEligible, loadWorkspace, markChannelAsRead, props.token, syncHubGroups, syncMessagesForChannel, upsertChannelMessage]);
 
   useEffect(() => {
     const hub = hubRef.current;
@@ -1779,6 +2176,7 @@ function WorkspaceShell(props: {
     setAttachments([]);
     setMentionCandidates([]);
     setMentionQuery(null);
+    markChannelAsRead(selectedTextChannelId, created.createdAtUtc);
   };
 
   const uploadChatImage = async (file: File) => {
@@ -1814,6 +2212,78 @@ function WorkspaceShell(props: {
         setError(reason instanceof Error ? reason.message : "Upload failed");
       });
     }
+  };
+
+  const handleComposerInputKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+
+    setMentionCandidates([]);
+    setMentionQuery(null);
+    event.currentTarget.blur();
+  };
+
+  const handleMessageListScroll = () => {
+    const activeChannelId = selectedTextChannelIdRef.current;
+    const element = messageListRef.current;
+    if (!activeChannelId || !element) {
+      return;
+    }
+
+    const atBottom = isNearBottom(element);
+    setChatViewState((current) => setChannelIsAtBottom(current, activeChannelId, atBottom));
+    if (!atBottom) {
+      return;
+    }
+
+    const messages = chatMessagesByChannelRef.current[activeChannelId] ?? [];
+    const last = messages[messages.length - 1];
+    if (last && isReadEligible(activeChannelId, true)) {
+      markChannelAsRead(activeChannelId, last.createdAtUtc);
+    }
+  };
+
+  const jumpToPresent = () => {
+    const activeChannelId = selectedTextChannelId;
+    if (!activeChannelId) {
+      return;
+    }
+
+    scrollActiveChatToBottom("smooth");
+    const messages = chatMessagesByChannelRef.current[activeChannelId] ?? [];
+    const last = messages[messages.length - 1];
+    if (last && isReadEligible(activeChannelId, true)) {
+      markChannelAsRead(activeChannelId, last.createdAtUtc);
+    }
+  };
+
+  const closeAttachmentMenu = () => {
+    setAttachmentMenuAnchorEl(null);
+  };
+
+  const openAttachmentMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    setAttachmentMenuAnchorEl(event.currentTarget);
+  };
+
+  const pickPhotoFromAttachMenu = () => {
+    closeAttachmentMenu();
+    attachPhotoInputRef.current?.click();
+  };
+
+  const handlePhotoPickerChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) {
+      return;
+    }
+
+    const availableSlots = Math.max(0, 4 - attachments.length);
+    for (const file of files.slice(0, availableSlots)) {
+      void uploadChatImage(file).catch((reason) => {
+        setError(reason instanceof Error ? reason.message : "Upload failed");
+      });
+    }
+    event.target.value = "";
   };
 
   const selectMentionCandidate = (candidate: MentionCandidateDto) => {
@@ -2580,6 +3050,14 @@ function WorkspaceShell(props: {
           event.target.value = "";
         }}
       />
+      <input
+        ref={attachPhotoInputRef}
+        hidden
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={handlePhotoPickerChange}
+      />
 
       {(error || infoMessage) && (
         <Stack
@@ -2631,9 +3109,11 @@ function WorkspaceShell(props: {
       >
         <ChannelSidebar
           workspaceName={workspaceData.workspace.name}
+          workspaceUnreadCount={workspaceUnreadCount}
           currentUser={props.currentUser}
           currentAvatarUrl={currentAvatarUrl}
           textChannels={textChannels}
+          textChannelUnreadCounts={textChannelUnreadCounts}
           voiceChannels={voiceChannels}
           members={workspaceData.members}
           speakingUserIds={speakingUserIds}
@@ -2788,172 +3268,265 @@ function WorkspaceShell(props: {
               </Typography>
             </Stack>
 
-            <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", pr: 0.4 }}>
-              <Stack spacing={0.1}>
-                {messageTimeline.map((item) => {
-                  if (item.kind === "separator") {
-                    return (
-                      <Stack
-                        key={item.key}
-                        direction="row"
-                        spacing={1}
-                        alignItems="center"
-                        sx={{ py: 1.1, px: 1 }}
-                      >
-                        <Divider sx={{ flex: 1, borderColor: "rgba(122, 136, 156, 0.24)" }} />
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            color: "text.disabled",
-                            letterSpacing: 0.35,
-                            textTransform: "uppercase",
-                            fontSize: "0.66rem",
-                          }}
+            <Box sx={{ flex: 1, minHeight: 0, position: "relative" }}>
+              <Box
+                ref={messageListRef}
+                className="app-scrollbar"
+                onScroll={handleMessageListScroll}
+                sx={{ height: "100%", overflowY: "auto", pr: 0.4, pb: 0.8 }}
+              >
+                <Stack spacing={0}>
+                  {messageTimeline.map((item) => {
+                    if (item.kind === "separator") {
+                      return (
+                        <Stack
+                          key={item.key}
+                          direction="row"
+                          spacing={1}
+                          alignItems="center"
+                          sx={{ py: 1.1, px: 1 }}
                         >
-                          {item.label}
-                        </Typography>
-                        <Divider sx={{ flex: 1, borderColor: "rgba(122, 136, 156, 0.24)" }} />
-                      </Stack>
-                    );
-                  }
-
-                  const message = item.message;
-                  const shortTime = formatRelativeMessageTime(message.createdAtUtc, timelineNowMs);
-                  const fullTime = formatFullMessageTime(message.createdAtUtc);
-                  const attachmentCount = message.attachments.length;
-                  const isOwnMessage = message.userId === props.currentUser.id;
-
-                  return (
-                    <Box
-                      key={item.key}
-                      className="chat-message-row"
-                      sx={{
-                        px: 1,
-                        py: item.showHeader ? 0.75 : 0.38,
-                        borderRadius: 1,
-                        bgcolor: isOwnMessage ? alpha("#6ea4ff", item.showHeader ? 0.08 : 0.045) : "transparent",
-                        transition: "background-color 120ms ease",
-                        "&:hover": {
-                          bgcolor: isOwnMessage ? alpha("#6ea4ff", 0.12) : "rgba(115, 129, 151, 0.09)",
-                        },
-                        "&:hover .chat-inline-time": {
-                          opacity: 1,
-                        },
-                      }}
-                    >
-                      <Stack direction="row" spacing={1.1} alignItems="flex-start">
-                        <Box sx={{ width: 28, flexShrink: 0, minHeight: 16, pt: 0.1, display: "grid", placeItems: "start" }}>
-                          {item.showHeader ? (
-                            <Avatar
-                              src={getSafeImageUrl(message.avatarUrl)}
-                              imgProps={{
-                                onError: () => {
-                                  markImageUrlBroken(message.avatarUrl);
-                                },
-                              }}
-                              sx={{ width: 26, height: 26, fontSize: "0.75rem" }}
-                            >
-                              {message.username[0]?.toUpperCase() ?? "?"}
-                            </Avatar>
-                          ) : (
-                            <Tooltip title={fullTime} placement="left">
-                              <Typography
-                                className="chat-inline-time"
-                                variant="caption"
-                                sx={{
-                                  color: "text.disabled",
-                                  fontSize: "0.62rem",
-                                  opacity: 0,
-                                  transition: "opacity 120ms ease",
-                                  userSelect: "none",
-                                }}
-                              >
-                                {shortTime}
-                              </Typography>
-                            </Tooltip>
-                          )}
-                        </Box>
-
-                        <Box sx={{ minWidth: 0, flex: 1 }}>
-                          {item.showHeader && (
-                            <Stack direction="row" spacing={0.8} alignItems="baseline" sx={{ mb: 0.18 }}>
-                              <Typography variant="body2" sx={{ fontWeight: 650, color: "#dce8ff" }}>
-                                {message.username}
-                              </Typography>
-                              <Tooltip title={fullTime} placement="top">
-                                <Typography variant="caption" sx={{ color: "text.disabled", fontSize: "0.67rem" }}>
-                                  {shortTime}
-                                </Typography>
-                              </Tooltip>
-                            </Stack>
-                          )}
-
+                          <Divider sx={{ flex: 1, borderColor: "rgba(122, 136, 156, 0.24)" }} />
                           <Typography
-                            variant="body2"
+                            variant="caption"
                             sx={{
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              lineHeight: 1.44,
-                              color: "rgba(229, 236, 247, 0.95)",
+                              color: "text.disabled",
+                              letterSpacing: 0.35,
+                              textTransform: "uppercase",
+                              fontSize: "0.66rem",
                             }}
                           >
-                            {renderMessageContent(message.content, message.mentions)}
+                            {item.label}
                           </Typography>
+                          <Divider sx={{ flex: 1, borderColor: "rgba(122, 136, 156, 0.24)" }} />
+                        </Stack>
+                      );
+                    }
 
-                          {attachmentCount > 0 && (
-                            <Box
+                    const message = item.message;
+                    const shortTime = formatRelativeMessageTime(message.createdAtUtc, timelineNowMs);
+                    const fullTime = formatFullMessageTime(message.createdAtUtc);
+                    const attachmentCount = message.attachments.length;
+                    const isOwnMessage = message.userId === props.currentUser.id;
+                    const showUnreadDivider =
+                      selectedChannelView.unreadCount > 0 &&
+                      firstUnreadMessageIdInSelectedChannel === message.id;
+
+                    return (
+                      <Box key={item.key}>
+                        {showUnreadDivider && (
+                          <Stack
+                            direction="row"
+                            spacing={1}
+                            alignItems="center"
+                            sx={{ py: 0.9, px: 1 }}
+                          >
+                            <Divider sx={{ flex: 1, borderColor: "rgba(121, 164, 234, 0.36)" }} />
+                            <Typography
+                              variant="caption"
                               sx={{
-                                mt: 0.72,
-                                width: "min(100%, 460px)",
-                                display: "grid",
-                                gap: 0.55,
-                                gridTemplateColumns:
-                                  attachmentCount === 1
-                                    ? "minmax(0, 1fr)"
-                                    : "repeat(2, minmax(0, 1fr))",
+                                color: "primary.light",
+                                letterSpacing: 0.22,
+                                textTransform: "uppercase",
+                                fontSize: "0.65rem",
+                                fontWeight: 700,
                               }}
                             >
-                              {message.attachments.map((attachment, attachmentIndex) => {
-                                const largeTile = attachmentCount === 3 && attachmentIndex === 0;
-                                const tileHeight =
-                                  attachmentCount === 1 ? 224 : largeTile ? 162 : 112;
+                              New
+                            </Typography>
+                            <Divider sx={{ flex: 1, borderColor: "rgba(121, 164, 234, 0.36)" }} />
+                          </Stack>
+                        )}
 
-                                return (
-                                  <Box
-                                    key={attachment.id}
-                                    component="img"
-                                    src={getSafeImageUrl(attachment.urlPath)}
-                                    alt={attachment.originalFileName}
-                                    onClick={() => openImageLightbox(message.attachments, attachmentIndex)}
-                                    onError={(event) => {
-                                      markImageUrlBroken(attachment.urlPath);
-                                      event.currentTarget.style.display = "none";
-                                    }}
+                        <Box
+                          className="chat-message-row"
+                          sx={{
+                            px: 1,
+                            py: item.showHeader ? 0.75 : isOwnMessage ? 0.1 : 0.38,
+                            borderRadius: 1,
+                            bgcolor: "transparent",
+                            transition: "background-color 120ms ease",
+                            "&:hover": {
+                              bgcolor: "rgba(115, 129, 151, 0.09)",
+                            },
+                            "&:hover .chat-inline-time": {
+                              opacity: 1,
+                            },
+                          }}
+                        >
+                          <Stack direction="row" spacing={1.1} alignItems="flex-start">
+                            <Box
+                              sx={{
+                                width: 28,
+                                flexShrink: 0,
+                                minHeight: 16,
+                                pt: 0.1,
+                                display: "grid",
+                                placeItems: "start",
+                              }}
+                            >
+                              {item.showHeader ? (
+                                <Avatar
+                                  src={getSafeImageUrl(message.avatarUrl)}
+                                  imgProps={{
+                                    onError: () => {
+                                      markImageUrlBroken(message.avatarUrl);
+                                    },
+                                  }}
+                                  sx={{ width: 26, height: 26, fontSize: "0.75rem" }}
+                                >
+                                  {message.username[0]?.toUpperCase() ?? "?"}
+                                </Avatar>
+                              ) : (
+                                <Tooltip title={fullTime} placement="left">
+                                  <Typography
+                                    className="chat-inline-time"
+                                    variant="caption"
                                     sx={{
-                                      width: "100%",
-                                      height: tileHeight,
-                                      objectFit: "cover",
-                                      borderRadius: 1.15,
-                                      border: "1px solid rgba(112, 128, 151, 0.34)",
-                                      cursor: "zoom-in",
-                                      gridColumn: largeTile ? "1 / span 2" : "auto",
-                                      transition: "transform 120ms ease, border-color 120ms ease",
-                                      "&:hover": {
-                                        transform: "translateY(-1px)",
-                                        borderColor: "rgba(151, 189, 255, 0.72)",
-                                      },
+                                      color: "text.disabled",
+                                      fontSize: "0.62rem",
+                                      opacity: 0,
+                                      transition: "opacity 120ms ease",
+                                      userSelect: "none",
                                     }}
-                                  />
-                                );
-                              })}
+                                  >
+                                    {shortTime}
+                                  </Typography>
+                                </Tooltip>
+                              )}
                             </Box>
-                          )}
+
+                            <Box
+                              className="chat-message-bubble"
+                              sx={{
+                                minWidth: 0,
+                                flex: 1,
+                                px: isOwnMessage ? 1 : 0,
+                                py: item.showHeader ? 0.56 : 0.45,
+                                bgcolor: isOwnMessage
+                                  ? alpha("#6f9ae8", item.showHeader ? 0.11 : 0.085)
+                                  : "transparent",
+                                border: "none",
+                                borderTopLeftRadius: isOwnMessage ? (item.groupedWithPrev ? 0.6 : 1.15) : 0,
+                                borderTopRightRadius: isOwnMessage ? (item.groupedWithPrev ? 0.6 : 1.15) : 0,
+                                borderBottomLeftRadius: isOwnMessage ? (item.groupedWithNext ? 0.6 : 1.15) : 0,
+                                borderBottomRightRadius: isOwnMessage ? (item.groupedWithNext ? 0.6 : 1.15) : 0,
+                              }}
+                            >
+                              {item.showHeader && (
+                                <Stack direction="row" spacing={0.8} alignItems="center" sx={{ mb: 0.2 }}>
+                                  <Typography
+                                    variant="body2"
+                                    sx={{ fontWeight: 650, color: isOwnMessage ? "#a9c7ff" : "#dce8ff" }}
+                                  >
+                                    {message.username}
+                                  </Typography>
+                                  <Tooltip title={fullTime} placement="top">
+                                    <Typography
+                                      variant="caption"
+                                      sx={{ color: "text.disabled", fontSize: "0.67rem" }}
+                                    >
+                                      {shortTime}
+                                    </Typography>
+                                  </Tooltip>
+                                </Stack>
+                              )}
+
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  whiteSpace: "pre-wrap",
+                                  wordBreak: "break-word",
+                                  lineHeight: 1.44,
+                                  color: "rgba(229, 236, 247, 0.95)",
+                                }}
+                              >
+                                {renderMessageContent(message.content, message.mentions, props.currentUser.id)}
+                              </Typography>
+
+                              {attachmentCount > 0 && (
+                                <Box
+                                  sx={{
+                                    mt: 0.72,
+                                    width: "min(100%, 460px)",
+                                    display: "grid",
+                                    gap: 0.55,
+                                    gridTemplateColumns:
+                                      attachmentCount === 1
+                                        ? "minmax(0, 1fr)"
+                                        : "repeat(2, minmax(0, 1fr))",
+                                  }}
+                                >
+                                  {message.attachments.map((attachment, attachmentIndex) => {
+                                    const largeTile = attachmentCount === 3 && attachmentIndex === 0;
+                                    const tileHeight =
+                                      attachmentCount === 1
+                                        ? 224
+                                        : attachmentCount === 2
+                                          ? 140
+                                          : largeTile
+                                            ? 176
+                                            : 108;
+
+                                    return (
+                                      <Box
+                                        key={attachment.id}
+                                        component="img"
+                                        src={getSafeImageUrl(attachment.urlPath)}
+                                        alt={attachment.originalFileName}
+                                        onClick={() => openImageLightbox(message.attachments, attachmentIndex)}
+                                        onError={(event) => {
+                                          markImageUrlBroken(attachment.urlPath);
+                                          event.currentTarget.style.display = "none";
+                                        }}
+                                        sx={{
+                                          width: "100%",
+                                          height: tileHeight,
+                                          objectFit: "cover",
+                                          borderRadius: 1.15,
+                                          border: "1px solid rgba(112, 128, 151, 0.34)",
+                                          cursor: "zoom-in",
+                                          gridColumn: largeTile ? "1 / span 2" : "auto",
+                                          transition: "transform 120ms ease, border-color 120ms ease",
+                                          "&:hover": {
+                                            transform: "translateY(-1px)",
+                                            borderColor: "rgba(151, 189, 255, 0.72)",
+                                          },
+                                        }}
+                                      />
+                                    );
+                                  })}
+                                </Box>
+                              )}
+                            </Box>
+                          </Stack>
                         </Box>
-                      </Stack>
-                    </Box>
-                  );
-                })}
-              </Stack>
+                      </Box>
+                    );
+                  })}
+                </Stack>
+              </Box>
+
+              {selectedChannelView.unreadCount > 0 && !selectedChannelView.isAtBottom && (
+                <Button
+                  size="small"
+                  variant="contained"
+                  onClick={jumpToPresent}
+                  sx={{
+                    position: "absolute",
+                    right: 14,
+                    bottom: 12,
+                    zIndex: 5,
+                    borderRadius: 999,
+                    px: 1.3,
+                    py: 0.46,
+                    minHeight: 0,
+                    boxShadow: "0 8px 20px rgba(0, 0, 0, 0.38)",
+                  }}
+                >
+                  Jump to present ({selectedChannelView.unreadCount > 99 ? "99+" : selectedChannelView.unreadCount})
+                </Button>
+              )}
             </Box>
 
             <Divider sx={{ my: 1 }} />
@@ -2961,7 +3534,12 @@ function WorkspaceShell(props: {
             <Box component="form" onSubmit={sendTextMessage} autoComplete="off">
               <Stack spacing={0.8}>
                 {attachments.length > 0 && (
-                  <Stack direction="row" spacing={0.7} sx={{ overflowX: "auto", pb: 0.3, pr: 0.2 }}>
+                  <Stack
+                    direction="row"
+                    spacing={0.7}
+                    className="app-scrollbar"
+                    sx={{ overflowX: "auto", pb: 0.3, pr: 0.2 }}
+                  >
                     {attachments.map((url) => (
                       <Box
                         key={url}
@@ -3014,7 +3592,7 @@ function WorkspaceShell(props: {
                 )}
 
                 {mentionQuery && mentionCandidates.length > 0 && (
-                  <Paper variant="outlined" sx={{ maxHeight: 180, overflowY: "auto" }}>
+                  <Paper variant="outlined" className="app-scrollbar" sx={{ maxHeight: 180, overflowY: "auto" }}>
                     <List dense disablePadding>
                       {mentionCandidates.map((candidate) => (
                         <ListItemButton
@@ -3044,12 +3622,14 @@ function WorkspaceShell(props: {
 
                 <Stack direction="row" spacing={0.8}>
                   <TextField
+                    inputRef={messageInputRef}
                     fullWidth
                     size="small"
                     placeholder="Message with @mentions and emoji"
                     value={messageDraft}
                     onChange={(event) => setMessageDraft(event.target.value)}
                     onPaste={handleComposerPaste}
+                    onKeyDown={handleComposerInputKeyDown}
                     autoComplete="off"
                     name={composerAutocompleteToken}
                     inputProps={{
@@ -3067,24 +3647,13 @@ function WorkspaceShell(props: {
                   >
                     <AddReactionIcon fontSize="small" />
                   </IconButton>
-                  <Button component="label" size="small" variant="outlined">
-                    Img
-                    <input
-                      hidden
-                      type="file"
-                      accept="image/*"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (!file) {
-                          return;
-                        }
-                        void uploadChatImage(file).catch((reason) => {
-                          setError(reason instanceof Error ? reason.message : "Upload failed");
-                        });
-                        event.target.value = "";
-                      }}
-                    />
-                  </Button>
+                  <IconButton
+                    size="small"
+                    onClick={openAttachmentMenu}
+                    aria-label="Attach file"
+                  >
+                    <AttachFileIcon fontSize="small" />
+                  </IconButton>
                   <Button type="submit" size="small" variant="contained" endIcon={<SendIcon />}>
                     Send
                   </Button>
@@ -3094,6 +3663,32 @@ function WorkspaceShell(props: {
           </Box>
         </Paper>
       </Box>
+
+      <Menu
+        anchorEl={attachmentMenuAnchorEl}
+        open={Boolean(attachmentMenuAnchorEl)}
+        onClose={closeAttachmentMenu}
+        anchorOrigin={{ vertical: "top", horizontal: "left" }}
+        transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+      >
+        <MenuItem onClick={pickPhotoFromAttachMenu}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 130 }}>
+            <ImageIcon fontSize="small" />
+            <Typography variant="body2">Фото</Typography>
+          </Stack>
+        </MenuItem>
+        <MenuItem disabled>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 130 }}>
+            <InsertDriveFileIcon fontSize="small" />
+            <Stack spacing={0} sx={{ minWidth: 0 }}>
+              <Typography variant="body2">Файл</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1 }}>
+                Soon
+              </Typography>
+            </Stack>
+          </Stack>
+        </MenuItem>
+      </Menu>
 
       <Dialog
         open={Boolean(imageLightbox)}

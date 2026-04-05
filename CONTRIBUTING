@@ -1,0 +1,72 @@
+# Contributing to Cascad
+
+Thank you for contributing.
+This document describes the expected workflow for proposing and shipping changes.
+
+## Before You Start
+
+- Open an issue (or discussion) for non-trivial changes before implementation.
+- Keep each pull request focused on one goal.
+- Do not mix refactors with feature behavior changes unless required.
+
+## Development Setup
+
+1. Clone the repository.
+2. Copy `.env.example` to `.env` and set required values.
+3. Start the stack:
+
+```bash
+docker compose up --build
+```
+
+For local API/Web development, see `README.md`.
+
+## Branches and Commits
+
+- Preferred branch prefixes:
+  - `feature/<short-name>`
+  - `fix/<short-name>`
+  - `chore/<short-name>`
+- Use clear commit messages.
+- Conventional commits are recommended (example: `fix(api): validate invite expiry`).
+
+## Pull Request Requirements
+
+Every pull request should include:
+
+- concise summary of what changed and why;
+- testing notes (what was run and results);
+- screenshots/video for UI changes;
+- backward-compatibility notes for API/data changes.
+
+## Quality Checks
+
+Run relevant checks before requesting review.
+
+Backend:
+
+```bash
+export DOTNET_CLI_HOME="$PWD/.dotnet"
+dotnet test backend/Cascad.sln
+```
+
+Web unit tests:
+
+```bash
+cd web
+npm run test:unit
+```
+
+Web e2e smoke (when UI/RTC behavior changes):
+
+```bash
+cd web
+npm run test:e2e:smoke
+```
+
+## Review and Merge
+
+- At least one maintainer review is required.
+- Address review comments with code updates or clear rationale.
+- Maintainers may squash or rebase on merge.
+

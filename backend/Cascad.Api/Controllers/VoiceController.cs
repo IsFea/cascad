@@ -977,11 +977,15 @@ public sealed class VoiceController : ControllerBase
             isServerDeafened,
             occurredAtUtc);
 
-        var tasks = new List<Task>
+        var hasChannelTransition = previousVoiceChannelId != currentVoiceChannelId;
+        var tasks = new List<Task>();
+
+        if (hasChannelTransition)
         {
-            _hubContext.Clients.Group(ChatGroupNames.Workspace(workspaceId))
-                .SendAsync("voicePresenceChanged", payload, cancellationToken)
-        };
+            tasks.Add(
+                _hubContext.Clients.Group(ChatGroupNames.Workspace(workspaceId))
+                    .SendAsync("voicePresenceChanged", payload, cancellationToken));
+        }
 
         if (previousVoiceChannelId.HasValue)
         {
@@ -995,6 +999,11 @@ public sealed class VoiceController : ControllerBase
             tasks.Add(
                 _hubContext.Clients.Group(ChatGroupNames.VoiceChannel(currentVoiceChannelId.Value))
                     .SendAsync("voiceChannelPresenceChanged", payload, cancellationToken));
+        }
+
+        if (tasks.Count == 0)
+        {
+            return;
         }
 
         await Task.WhenAll(tasks);

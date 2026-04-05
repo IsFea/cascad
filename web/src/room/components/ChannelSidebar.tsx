@@ -31,6 +31,7 @@ import {
 } from "@mui/material";
 import { getSafeImageUrl, markImageUrlBroken } from "../../imageUrlFallback";
 import { ChannelDto, UserDto, WorkspaceMemberDto } from "../../types";
+import { resolveVoiceStatusIndicator } from "../../voicePresence";
 import { initials } from "../utils";
 
 export function ChannelSidebar(props: {
@@ -200,6 +201,7 @@ export function ChannelSidebar(props: {
                   <List dense disablePadding sx={{ ml: 2.45, mt: 0.2, mb: 0 }}>
                     {participants.map((participant) => {
                       const isSpeaking = props.speakingUserIds.has(participant.userId);
+                      const voiceStatusIndicator = resolveVoiceStatusIndicator(participant);
                       return (
                         <ListItemButton
                           key={`${channel.id}-${participant.userId}`}
@@ -246,10 +248,45 @@ export function ChannelSidebar(props: {
                             </Avatar>
                           </ListItemAvatar>
                           <ListItemText
-                            primary={participant.username}
+                            primary={
+                              <Stack direction="row" spacing={0.4} alignItems="center" sx={{ minWidth: 0 }}>
+                                <Typography
+                                  component="span"
+                                  sx={{
+                                    fontSize: "0.73rem",
+                                    color: isSpeaking ? "secondary.main" : "text.secondary",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {participant.username}
+                                </Typography>
+                                {voiceStatusIndicator && (
+                                  <Tooltip title={voiceStatusIndicator.tooltip}>
+                                    <Box
+                                      component="span"
+                                      sx={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        color:
+                                          voiceStatusIndicator.kind === "deafened"
+                                            ? "warning.light"
+                                            : "error.light",
+                                      }}
+                                    >
+                                      {voiceStatusIndicator.kind === "deafened" ? (
+                                        <HeadsetOffIcon sx={{ fontSize: 13 }} />
+                                      ) : (
+                                        <MicOffIcon sx={{ fontSize: 13 }} />
+                                      )}
+                                    </Box>
+                                  </Tooltip>
+                                )}
+                              </Stack>
+                            }
                             primaryTypographyProps={{
-                              fontSize: "0.73rem",
-                              color: isSpeaking ? "secondary.main" : "text.secondary",
+                              component: "div",
                             }}
                           />
                         </ListItemButton>

@@ -721,6 +721,8 @@ export function EmbeddedVoiceStage(props: {
           selectedAudioMenuParticipant !== null &&
           canModerateSelectedParticipant(selectedAudioMenuParticipant.identity)
         }
+        participantMuted={selectedParticipantUserState?.isMuted ?? false}
+        participantDeafened={selectedParticipantUserState?.isDeafened ?? false}
         serverMuted={selectedParticipantUserState?.isServerMuted ?? false}
         serverDeafened={selectedParticipantUserState?.isServerDeafened ?? false}
         participantRole={selectedParticipantUserState?.role ?? null}
@@ -766,6 +768,8 @@ export function EmbeddedVoiceStage(props: {
           selectedContextParticipant !== null &&
           canModerateSelectedParticipant(selectedContextParticipant.identity)
         }
+        participantMuted={selectedContextUserState?.isMuted ?? false}
+        participantDeafened={selectedContextUserState?.isDeafened ?? false}
         serverMuted={selectedContextUserState?.isServerMuted ?? false}
         serverDeafened={selectedContextUserState?.isServerDeafened ?? false}
         participantRole={selectedContextUserState?.role ?? null}

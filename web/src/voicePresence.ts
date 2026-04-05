@@ -1,6 +1,15 @@
 import { VoicePresenceChangedEvent, WorkspaceMemberDto } from "./types";
 
 export type VoiceEarconType = "join" | "leave" | "connect" | "connecting" | "disconnect";
+export type VoicePresenceEventSource = "workspace" | "voiceChannel";
+export type VoiceStatusIndicator = {
+  kind: "muted" | "deafened";
+  tooltip: string;
+};
+export type VoiceSelfStateSnapshot = Pick<
+  WorkspaceMemberDto,
+  "isMuted" | "isDeafened" | "isServerMuted" | "isServerDeafened"
+>;
 
 export const VOICE_EARCON_COOLDOWN_MS = 350;
 export const VOICE_DISCONNECT_EARCON_DEDUPE_MS = 900;
@@ -126,6 +135,100 @@ export function buildVoicePresenceEventSignature(event: VoicePresenceChangedEven
     event.currentVoiceChannelId ?? "",
     event.occurredAtUtc,
   ].join("|");
+}
+
+export function isVoicePresenceChannelTransition(event: VoicePresenceChangedEvent): boolean {
+  return event.previousVoiceChannelId !== event.currentVoiceChannelId;
+}
+
+export function shouldApplyVoicePresenceEventForSource(
+  event: VoicePresenceChangedEvent,
+  source: VoicePresenceEventSource,
+  connectedVoiceChannelId: string | null,
+): boolean {
+  if (source === "voiceChannel") {
+    return true;
+  }
+
+  if (isVoicePresenceChannelTransition(event)) {
+    return true;
+  }
+
+  return Boolean(
+    connectedVoiceChannelId &&
+      event.previousVoiceChannelId === connectedVoiceChannelId &&
+      event.currentVoiceChannelId === connectedVoiceChannelId,
+  );
+}
+
+export function resolveVoiceStatusIndicator(
+  member: Pick<
+    WorkspaceMemberDto,
+    "isMuted" | "isDeafened" | "isServerMuted" | "isServerDeafened"
+  >,
+): VoiceStatusIndicator | null {
+  if (member.isDeafened) {
+    return {
+      kind: "deafened",
+      tooltip: member.isServerDeafened ? "Server deafened" : "Self deafened",
+    };
+  }
+
+  if (member.isMuted) {
+    const serverMuted = member.isServerMuted || member.isServerDeafened;
+    return {
+      kind: "muted",
+      tooltip: serverMuted ? "Server muted" : "Self muted",
+    };
+  }
+
+  return null;
+}
+
+export function createOptimisticSelfVoiceStateUpdate(
+  current: VoiceSelfStateSnapshot,
+  nextMuted: boolean,
+  nextDeafened: boolean,
+  isAdmin: boolean,
+): {
+  optimistic: VoiceSelfStateSnapshot;
+  rollback: VoiceSelfStateSnapshot;
+} {
+  const optimistic: VoiceSelfStateSnapshot = {
+    isMuted: nextMuted,
+    isDeafened: nextDeafened,
+    isServerMuted: isAdmin && !nextMuted ? false : current.isServerMuted,
+    isServerDeafened: isAdmin && !nextDeafened ? false : current.isServerDeafened,
+  };
+  return {
+    optimistic,
+    rollback: current,
+  };
+}
+
+export function applyOptimisticModerationVoiceState(
+  member: Pick<
+    WorkspaceMemberDto,
+    "isMuted" | "isDeafened" | "isServerMuted" | "isServerDeafened"
+  >,
+  patch: {
+    isServerMuted?: boolean;
+    isServerDeafened?: boolean;
+  },
+): Pick<WorkspaceMemberDto, "isMuted" | "isDeafened" | "isServerMuted" | "isServerDeafened"> {
+  const selfMuted = member.isMuted && !member.isServerMuted && !member.isServerDeafened;
+  const selfDeafened = member.isDeafened && !member.isServerDeafened;
+  const isServerMuted = patch.isServerMuted ?? member.isServerMuted;
+  const isServerDeafened = patch.isServerDeafened ?? member.isServerDeafened;
+  const isDeafened = selfDeafened || isServerDeafened;
+  const isMuted = selfMuted || isServerMuted || isServerDeafened;
+
+  return {
+    isMuted,
+    isDeafened,
+    isServerMuted,
+    isServerDeafened,
+  };
 }
 
 function readStringField(input: Record<string, unknown>, camel: string, pascal: string): string | null {

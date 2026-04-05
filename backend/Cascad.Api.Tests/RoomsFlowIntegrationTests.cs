@@ -659,7 +659,7 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
-    public async Task VoicePresenceChanged_ShouldBeDelivered_OnModerationWithoutChannelTransition()
+    public async Task VoiceChannelPresenceChanged_ShouldBeDelivered_OnModerationWithoutChannelTransition_WithoutWorkspaceBroadcast()
     {
         var adminClient = _factory.CreateClient();
         var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
@@ -686,7 +686,8 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
         bobClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bobToken);
         var bobWorkspace = await bobClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
         Assert.NotNull(bobWorkspace);
-        var eventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var workspaceEventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var voiceChannelEventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
         var hubConnection = new HubConnectionBuilder()
             .WithUrl(
                 new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
@@ -700,12 +701,16 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
 
         hubConnection.On<VoicePresenceChangedEventDto>(
             "voicePresenceChanged",
-            payload => eventChannel.Writer.TryWrite(payload));
+            payload => workspaceEventChannel.Writer.TryWrite(payload));
+        hubConnection.On<VoicePresenceChangedEventDto>(
+            "voiceChannelPresenceChanged",
+            payload => voiceChannelEventChannel.Writer.TryWrite(payload));
 
         await hubConnection.StartAsync();
         try
         {
             await hubConnection.InvokeAsync("JoinWorkspace", workspaceId);
+            await hubConnection.InvokeAsync("JoinVoiceChannel", voiceChannelId);
 
             var muteResponse = await adminClient.PostAsJsonAsync(
                 "/api/voice/moderation/mute",
@@ -718,7 +723,7 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
             muteResponse.EnsureSuccessStatusCode();
 
             var moderationEvent = await WaitForVoicePresenceAsync(
-                eventChannel.Reader,
+                voiceChannelEventChannel.Reader,
                 x =>
                     x.UserId == aliceUserId &&
                     x.PreviousVoiceChannelId == voiceChannelId &&
@@ -728,6 +733,16 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
             Assert.Equal(workspaceId, moderationEvent.WorkspaceId);
             Assert.True(moderationEvent.IsMuted);
             Assert.True(moderationEvent.IsServerMuted);
+
+            var workspaceModerationEvent = await TryWaitForVoicePresenceAsync(
+                workspaceEventChannel.Reader,
+                x =>
+                    x.UserId == aliceUserId &&
+                    x.PreviousVoiceChannelId == voiceChannelId &&
+                    x.CurrentVoiceChannelId == voiceChannelId &&
+                    x.IsServerMuted,
+                TimeSpan.FromMilliseconds(700));
+            Assert.Null(workspaceModerationEvent);
         }
         finally
         {
@@ -781,6 +796,30 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
         }
 
         throw new TimeoutException("Timed out waiting for voicePresenceChanged event.");
+    }
+
+    private static async Task<VoicePresenceChangedEventDto?> TryWaitForVoicePresenceAsync(
+        ChannelReader<VoicePresenceChangedEventDto> reader,
+        Func<VoicePresenceChangedEventDto, bool> predicate,
+        TimeSpan timeout)
+    {
+        using var timeoutCts = new CancellationTokenSource(timeout);
+        try
+        {
+            await foreach (var item in reader.ReadAllAsync(timeoutCts.Token))
+            {
+                if (predicate(item))
+                {
+                    return item;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+
+        return null;
     }
 
     private sealed record VoicePresenceChangedEventDto(

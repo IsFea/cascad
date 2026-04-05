@@ -60,8 +60,12 @@ import {
   WorkspaceBootstrapResponse,
 } from "./types";
 import {
+  applyOptimisticModerationVoiceState,
   buildVoicePresenceEventSignature,
+  createOptimisticSelfVoiceStateUpdate,
   isVoiceEarconCooldownPassed,
+  shouldApplyVoicePresenceEventForSource,
+  isVoicePresenceChannelTransition,
   normalizeVoicePresenceChangedEvent,
   patchWorkspaceMembersVoiceState,
   resolveLocalConnectEarconType,
@@ -834,6 +838,55 @@ function WorkspaceShell(props: {
     [props.currentUser.id],
   );
 
+  const patchWorkspaceMemberVoiceFlags = useCallback(
+    (
+      userId: string,
+      next: {
+        isMuted?: boolean;
+        isDeafened?: boolean;
+        isServerMuted?: boolean;
+        isServerDeafened?: boolean;
+      },
+    ) => {
+      setWorkspaceData((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const index = current.members.findIndex((member) => member.userId === userId);
+        if (index < 0) {
+          return current;
+        }
+
+        const member = current.members[index];
+        const updated: WorkspaceMemberDto = {
+          ...member,
+          isMuted: next.isMuted ?? member.isMuted,
+          isDeafened: next.isDeafened ?? member.isDeafened,
+          isServerMuted: next.isServerMuted ?? member.isServerMuted,
+          isServerDeafened: next.isServerDeafened ?? member.isServerDeafened,
+        };
+
+        if (
+          updated.isMuted === member.isMuted &&
+          updated.isDeafened === member.isDeafened &&
+          updated.isServerMuted === member.isServerMuted &&
+          updated.isServerDeafened === member.isServerDeafened
+        ) {
+          return current;
+        }
+
+        const members = current.members.slice();
+        members[index] = updated;
+        return {
+          ...current,
+          members,
+        };
+      });
+    },
+    [],
+  );
+
   const loadWorkspace = useCallback(async () => {
     const data = await apiCall<WorkspaceBootstrapResponse>("/workspace", "GET", undefined, props.token);
     setWorkspaceData(data);
@@ -1260,7 +1313,7 @@ function WorkspaceShell(props: {
       },
     );
 
-    const applyVoicePresenceEvent = (rawEvent: unknown) => {
+    const applyVoicePresenceEvent = (rawEvent: unknown, source: "workspace" | "voiceChannel") => {
       const event = normalizeVoicePresenceChangedEvent(rawEvent);
       if (!event) {
         return;
@@ -1268,6 +1321,16 @@ function WorkspaceShell(props: {
 
       const currentWorkspaceId = workspaceIdRef.current;
       if (!currentWorkspaceId || event.workspaceId !== currentWorkspaceId) {
+        return;
+      }
+
+      if (
+        !shouldApplyVoicePresenceEventForSource(
+          event,
+          source,
+          connectedVoiceChannelIdRef.current,
+        )
+      ) {
         return;
       }
 
@@ -1334,6 +1397,7 @@ function WorkspaceShell(props: {
 
       if (
         event.userId === currentUserIdRef.current &&
+        isVoicePresenceChannelTransition(event) &&
         connectedVoiceChannelIdRef.current &&
         event.previousVoiceChannelId === connectedVoiceChannelIdRef.current &&
         event.currentVoiceChannelId === null
@@ -1355,8 +1419,12 @@ function WorkspaceShell(props: {
       tryPlayVoiceEarcon(earconType);
     };
 
-    hub.on("voicePresenceChanged", applyVoicePresenceEvent);
-    hub.on("voiceChannelPresenceChanged", applyVoicePresenceEvent);
+    hub.on("voicePresenceChanged", (rawEvent: unknown) => {
+      applyVoicePresenceEvent(rawEvent, "workspace");
+    });
+    hub.on("voiceChannelPresenceChanged", (rawEvent: unknown) => {
+      applyVoicePresenceEvent(rawEvent, "voiceChannel");
+    });
 
     void hub
       .start()
@@ -1759,6 +1827,29 @@ function WorkspaceShell(props: {
       return;
     }
 
+    const optimisticUpdate = createOptimisticSelfVoiceStateUpdate(
+      {
+        isMuted: selfMuted,
+        isDeafened: selfDeafened,
+        isServerMuted: selfServerMuted,
+        isServerDeafened: selfServerDeafened,
+      },
+      nextMuted,
+      nextDeafened,
+      isCurrentUserAdmin,
+    );
+
+    setSelfMuted(optimisticUpdate.optimistic.isMuted);
+    setSelfDeafened(optimisticUpdate.optimistic.isDeafened);
+    setSelfServerMuted(optimisticUpdate.optimistic.isServerMuted);
+    setSelfServerDeafened(optimisticUpdate.optimistic.isServerDeafened);
+    patchSelfWorkspaceVoiceState({
+      isMuted: optimisticUpdate.optimistic.isMuted,
+      isDeafened: optimisticUpdate.optimistic.isDeafened,
+      isServerMuted: optimisticUpdate.optimistic.isServerMuted,
+      isServerDeafened: optimisticUpdate.optimistic.isServerDeafened,
+    });
+
     try {
       await apiCall<void>(
         "/voice/self-state",
@@ -1776,6 +1867,18 @@ function WorkspaceShell(props: {
         handleVoiceSessionReplaced();
         return;
       }
+
+      setSelfMuted(optimisticUpdate.rollback.isMuted);
+      setSelfDeafened(optimisticUpdate.rollback.isDeafened);
+      setSelfServerMuted(optimisticUpdate.rollback.isServerMuted);
+      setSelfServerDeafened(optimisticUpdate.rollback.isServerDeafened);
+      patchSelfWorkspaceVoiceState({
+        isMuted: optimisticUpdate.rollback.isMuted,
+        isDeafened: optimisticUpdate.rollback.isDeafened,
+        isServerMuted: optimisticUpdate.rollback.isServerMuted,
+        isServerDeafened: optimisticUpdate.rollback.isServerDeafened,
+      });
+
       if (isVoiceServerModeratedError(reason)) {
         setInfoMessage("Voice state is controlled by server moderation.");
         await loadWorkspace();
@@ -1784,8 +1887,6 @@ function WorkspaceShell(props: {
       throw reason;
     }
 
-    setSelfMuted(nextMuted);
-    setSelfDeafened(nextDeafened);
     await loadWorkspace();
   };
 
@@ -1964,30 +2065,80 @@ function WorkspaceShell(props: {
   };
 
   const setServerMuted = async (channelId: string, targetUserId: string, muted: boolean) => {
-    await apiCall<void>(
-      "/voice/moderation/mute",
-      "POST",
-      {
-        channelId,
-        targetUserId,
-        isMuted: muted,
-      },
-      props.token,
-    );
+    const targetMember = workspaceData?.members.find((member) => member.userId === targetUserId) ?? null;
+    const previousVoiceState = targetMember
+      ? {
+          isMuted: targetMember.isMuted,
+          isDeafened: targetMember.isDeafened,
+          isServerMuted: targetMember.isServerMuted,
+          isServerDeafened: targetMember.isServerDeafened,
+        }
+      : null;
+
+    if (previousVoiceState) {
+      const optimisticVoiceState = applyOptimisticModerationVoiceState(previousVoiceState, {
+        isServerMuted: muted,
+      });
+      patchWorkspaceMemberVoiceFlags(targetUserId, optimisticVoiceState);
+    }
+
+    try {
+      await apiCall<void>(
+        "/voice/moderation/mute",
+        "POST",
+        {
+          channelId,
+          targetUserId,
+          isMuted: muted,
+        },
+        props.token,
+      );
+    } catch (reason) {
+      if (previousVoiceState) {
+        patchWorkspaceMemberVoiceFlags(targetUserId, previousVoiceState);
+      }
+      throw reason;
+    }
+
     await loadWorkspace();
   };
 
   const setServerDeafened = async (channelId: string, targetUserId: string, deafened: boolean) => {
-    await apiCall<void>(
-      "/voice/moderation/deafen",
-      "POST",
-      {
-        channelId,
-        targetUserId,
-        isDeafened: deafened,
-      },
-      props.token,
-    );
+    const targetMember = workspaceData?.members.find((member) => member.userId === targetUserId) ?? null;
+    const previousVoiceState = targetMember
+      ? {
+          isMuted: targetMember.isMuted,
+          isDeafened: targetMember.isDeafened,
+          isServerMuted: targetMember.isServerMuted,
+          isServerDeafened: targetMember.isServerDeafened,
+        }
+      : null;
+
+    if (previousVoiceState) {
+      const optimisticVoiceState = applyOptimisticModerationVoiceState(previousVoiceState, {
+        isServerDeafened: deafened,
+      });
+      patchWorkspaceMemberVoiceFlags(targetUserId, optimisticVoiceState);
+    }
+
+    try {
+      await apiCall<void>(
+        "/voice/moderation/deafen",
+        "POST",
+        {
+          channelId,
+          targetUserId,
+          isDeafened: deafened,
+        },
+        props.token,
+      );
+    } catch (reason) {
+      if (previousVoiceState) {
+        patchWorkspaceMemberVoiceFlags(targetUserId, previousVoiceState);
+      }
+      throw reason;
+    }
+
     await loadWorkspace();
   };
 

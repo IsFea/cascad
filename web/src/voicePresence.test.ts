@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { VoicePresenceChangedEvent, WorkspaceMemberDto } from "./types";
 import {
+  applyOptimisticModerationVoiceState,
   buildVoicePresenceEventSignature,
+  createOptimisticSelfVoiceStateUpdate,
   isVoiceEarconCooldownPassed,
+  isVoicePresenceChannelTransition,
   normalizeVoicePresenceChangedEvent,
   patchWorkspaceMembersVoiceState,
+  resolveVoiceStatusIndicator,
   resolveVoicePresenceOccurredAtMs,
   resolveLocalConnectEarconType,
   resolveVoiceEarconType,
   shouldApplyVoicePresenceByTimestamp,
+  shouldApplyVoicePresenceEventForSource,
   shouldPlayLocalDisconnectEarcon,
   shouldStartConnectingEarconLoop,
   VOICE_DISCONNECT_EARCON_DEDUPE_MS,
@@ -269,5 +274,138 @@ describe("voicePresence:timestamp ordering", () => {
       }),
     );
     expect(signature).toBe("u-9|v-1|v-2|2026-04-04T10:00:01.000Z");
+  });
+});
+
+describe("voicePresence:event source filtering", () => {
+  it("treats channel change as transition", () => {
+    expect(
+      isVoicePresenceChannelTransition(
+        makeEvent({
+          previousVoiceChannelId: "v-1",
+          currentVoiceChannelId: "v-2",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("applies workspace events only for transitions or active-channel fallback", () => {
+    const stateOnly = makeEvent({
+      previousVoiceChannelId: "v-1",
+      currentVoiceChannelId: "v-1",
+    });
+
+    expect(shouldApplyVoicePresenceEventForSource(stateOnly, "workspace", null)).toBe(false);
+    expect(shouldApplyVoicePresenceEventForSource(stateOnly, "workspace", "v-2")).toBe(false);
+    expect(shouldApplyVoicePresenceEventForSource(stateOnly, "workspace", "v-1")).toBe(true);
+    expect(shouldApplyVoicePresenceEventForSource(stateOnly, "voiceChannel", null)).toBe(true);
+  });
+});
+
+describe("voicePresence:status indicators", () => {
+  it("prefers deafened icon over muted and reports source", () => {
+    expect(
+      resolveVoiceStatusIndicator(
+        makeMember({
+          isMuted: true,
+          isDeafened: true,
+          isServerDeafened: true,
+        }),
+      ),
+    ).toEqual({
+      kind: "deafened",
+      tooltip: "Server deafened",
+    });
+  });
+
+  it("returns self/server muted reasons", () => {
+    expect(
+      resolveVoiceStatusIndicator(
+        makeMember({
+          isMuted: true,
+          isDeafened: false,
+          isServerMuted: false,
+        }),
+      ),
+    ).toEqual({
+      kind: "muted",
+      tooltip: "Self muted",
+    });
+
+    expect(
+      resolveVoiceStatusIndicator(
+        makeMember({
+          isMuted: true,
+          isDeafened: false,
+          isServerMuted: true,
+        }),
+      ),
+    ).toEqual({
+      kind: "muted",
+      tooltip: "Server muted",
+    });
+  });
+
+  it("returns null when no mute/deafen is active", () => {
+    expect(resolveVoiceStatusIndicator(makeMember())).toBeNull();
+  });
+});
+
+describe("voicePresence:optimistic updates", () => {
+  it("builds optimistic self update with rollback snapshot", () => {
+    const current = {
+      isMuted: false,
+      isDeafened: false,
+      isServerMuted: true,
+      isServerDeafened: true,
+    } as const;
+
+    const update = createOptimisticSelfVoiceStateUpdate(current, false, false, true);
+    expect(update.optimistic).toEqual({
+      isMuted: false,
+      isDeafened: false,
+      isServerMuted: false,
+      isServerDeafened: false,
+    });
+    expect(update.rollback).toEqual(current);
+  });
+
+  it("applies optimistic moderation patch with effective state recalculation", () => {
+    const current = {
+      isMuted: false,
+      isDeafened: false,
+      isServerMuted: false,
+      isServerDeafened: false,
+    };
+
+    expect(
+      applyOptimisticModerationVoiceState(current, {
+        isServerMuted: true,
+      }),
+    ).toEqual({
+      isMuted: true,
+      isDeafened: false,
+      isServerMuted: true,
+      isServerDeafened: false,
+    });
+
+    expect(
+      applyOptimisticModerationVoiceState(
+        {
+          isMuted: true,
+          isDeafened: true,
+          isServerMuted: false,
+          isServerDeafened: true,
+        },
+        {
+          isServerDeafened: false,
+        },
+      ),
+    ).toEqual({
+      isMuted: false,
+      isDeafened: false,
+      isServerMuted: false,
+      isServerDeafened: false,
+    });
   });
 });

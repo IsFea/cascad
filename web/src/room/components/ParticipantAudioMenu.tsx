@@ -1,12 +1,14 @@
 import DesktopAccessDisabledIcon from "@mui/icons-material/DesktopAccessDisabled";
 import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
 import GavelIcon from "@mui/icons-material/Gavel";
+import HeadsetOffIcon from "@mui/icons-material/HeadsetOff";
 import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import MicIcon from "@mui/icons-material/Mic";
 import MicOffIcon from "@mui/icons-material/MicOff";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import { Box, Divider, Menu, MenuItem, Slider, Stack, Typography } from "@mui/material";
 import { PlatformRole } from "../../types";
+import { resolveVoiceStatusIndicator } from "../../voicePresence";
 import { ParticipantAudioMenuState, ParticipantState } from "../types";
 import { volumePercent } from "../utils";
 
@@ -21,6 +23,8 @@ export function ParticipantAudioMenu(props: {
   onResetAudio: (identity: string) => void;
   showLocalAudioControls: boolean;
   canModerate: boolean;
+  participantMuted?: boolean;
+  participantDeafened?: boolean;
   serverMuted: boolean;
   serverDeafened: boolean;
   participantRole: PlatformRole | null;
@@ -31,6 +35,12 @@ export function ParticipantAudioMenu(props: {
 }) {
   const showLocalAudioControlsForTarget =
     props.showLocalAudioControls && Boolean(props.participant && !props.participant.isLocal);
+  const voiceStatusIndicator = resolveVoiceStatusIndicator({
+    isMuted: props.participantMuted ?? false,
+    isDeafened: props.participantDeafened ?? false,
+    isServerMuted: props.serverMuted,
+    isServerDeafened: props.serverDeafened,
+  });
 
   return (
     <Menu
@@ -47,9 +57,30 @@ export function ParticipantAudioMenu(props: {
     >
       {props.participant ? (
         <Box sx={{ px: 1.4, py: 1, width: 310 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-            {props.participant.displayName}
-          </Typography>
+          <Stack direction="row" spacing={0.7} alignItems="center" sx={{ minWidth: 0 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+              {props.participant.displayName}
+            </Typography>
+            {voiceStatusIndicator && (
+              <Stack
+                direction="row"
+                spacing={0.4}
+                alignItems="center"
+                sx={{
+                  color: voiceStatusIndicator.kind === "deafened" ? "warning.light" : "error.light",
+                }}
+              >
+                {voiceStatusIndicator.kind === "deafened" ? (
+                  <HeadsetOffIcon fontSize="small" />
+                ) : (
+                  <MicOffIcon fontSize="small" />
+                )}
+                <Typography variant="caption" color="text.secondary">
+                  {voiceStatusIndicator.tooltip}
+                </Typography>
+              </Stack>
+            )}
+          </Stack>
           <Typography variant="caption" color="text.secondary">
             Local audio controls
           </Typography>

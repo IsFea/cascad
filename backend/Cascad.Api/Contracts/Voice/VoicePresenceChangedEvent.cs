@@ -7,6 +7,7 @@ public sealed record VoicePresenceChangedEvent(
     string? AvatarUrl,
     Guid? PreviousVoiceChannelId,
     Guid? CurrentVoiceChannelId,
+    bool IsScreenSharing,
     bool IsMuted,
     bool IsDeafened,
     bool IsServerMuted,

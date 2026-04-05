@@ -26,6 +26,7 @@ export function patchWorkspaceMembersVoiceState(
   const current = members[index];
   if (
     current.connectedVoiceChannelId === event.currentVoiceChannelId &&
+    current.isScreenSharing === event.isScreenSharing &&
     current.isMuted === event.isMuted &&
     current.isDeafened === event.isDeafened &&
     current.isServerMuted === event.isServerMuted &&
@@ -38,6 +39,7 @@ export function patchWorkspaceMembersVoiceState(
   updated[index] = {
     ...current,
     connectedVoiceChannelId: event.currentVoiceChannelId,
+    isScreenSharing: event.isScreenSharing,
     isMuted: event.isMuted,
     isDeafened: event.isDeafened,
     isServerMuted: event.isServerMuted,
@@ -133,6 +135,11 @@ export function buildVoicePresenceEventSignature(event: VoicePresenceChangedEven
     event.userId,
     event.previousVoiceChannelId ?? "",
     event.currentVoiceChannelId ?? "",
+    event.isScreenSharing ? "screen" : "noscreen",
+    event.isMuted ? "muted" : "unmuted",
+    event.isDeafened ? "deafened" : "undeafened",
+    event.isServerMuted ? "server-muted" : "server-unmuted",
+    event.isServerDeafened ? "server-deafened" : "server-undeafened",
     event.occurredAtUtc,
   ].join("|");
 }
@@ -273,6 +280,7 @@ export function normalizeVoicePresenceChangedEvent(raw: unknown): VoicePresenceC
   const username = readStringField(input, "username", "Username");
   const isMuted = readBooleanField(input, "isMuted", "IsMuted");
   const isDeafened = readBooleanField(input, "isDeafened", "IsDeafened");
+  const isScreenSharing = readBooleanField(input, "isScreenSharing", "IsScreenSharing");
   const isServerMuted = readBooleanField(input, "isServerMuted", "IsServerMuted");
   const isServerDeafened = readBooleanField(input, "isServerDeafened", "IsServerDeafened");
 
@@ -287,6 +295,7 @@ export function normalizeVoicePresenceChangedEvent(raw: unknown): VoicePresenceC
     avatarUrl: readStringField(input, "avatarUrl", "AvatarUrl"),
     previousVoiceChannelId: readStringField(input, "previousVoiceChannelId", "PreviousVoiceChannelId"),
     currentVoiceChannelId: readStringField(input, "currentVoiceChannelId", "CurrentVoiceChannelId"),
+    isScreenSharing: isScreenSharing ?? false,
     isMuted,
     isDeafened,
     isServerMuted: isServerMuted ?? false,

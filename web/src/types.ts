@@ -63,6 +63,7 @@ export type WorkspaceMemberDto = {
   role: PlatformRole;
   avatarUrl: string | null;
   connectedVoiceChannelId: string | null;
+  isScreenSharing: boolean;
   isMuted: boolean;
   isDeafened: boolean;
   isServerMuted: boolean;
@@ -139,6 +140,7 @@ export type VoicePresenceChangedEvent = {
   avatarUrl: string | null;
   previousVoiceChannelId: string | null;
   currentVoiceChannelId: string | null;
+  isScreenSharing: boolean;
   isMuted: boolean;
   isDeafened: boolean;
   isServerMuted: boolean;

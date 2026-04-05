@@ -8,6 +8,7 @@ public sealed record WorkspaceMemberDto(
     PlatformRole Role,
     string? AvatarUrl,
     Guid? ConnectedVoiceChannelId,
+    bool IsScreenSharing,
     bool IsMuted,
     bool IsDeafened,
     bool IsServerMuted,

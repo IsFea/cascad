@@ -28,6 +28,7 @@ function makeMember(overrides: Partial<WorkspaceMemberDto> = {}): WorkspaceMembe
     role: "User",
     avatarUrl: null,
     connectedVoiceChannelId: null,
+    isScreenSharing: false,
     isMuted: false,
     isDeafened: false,
     isServerMuted: false,
@@ -44,6 +45,7 @@ function makeEvent(overrides: Partial<VoicePresenceChangedEvent> = {}): VoicePre
     avatarUrl: null,
     previousVoiceChannelId: null,
     currentVoiceChannelId: "v-1",
+    isScreenSharing: false,
     isMuted: false,
     isDeafened: false,
     isServerMuted: false,
@@ -67,6 +69,7 @@ describe("voicePresence:patchWorkspaceMembersVoiceState", () => {
 
     expect(updated).not.toBe(members);
     expect(updated[0].connectedVoiceChannelId).toBe("v-2");
+    expect(updated[0].isScreenSharing).toBe(false);
     expect(updated[0].isMuted).toBe(true);
     expect(updated[0].isDeafened).toBe(true);
     expect(updated[0].isServerMuted).toBe(false);
@@ -210,6 +213,7 @@ describe("voicePresence:normalizeVoicePresenceChangedEvent", () => {
       AvatarUrl: null,
       PreviousVoiceChannelId: null,
       CurrentVoiceChannelId: "v-1",
+      IsScreenSharing: true,
       IsMuted: false,
       IsDeafened: false,
       IsServerMuted: true,
@@ -218,6 +222,7 @@ describe("voicePresence:normalizeVoicePresenceChangedEvent", () => {
     });
     expect(normalized?.workspaceId).toBe("w-1");
     expect(normalized?.currentVoiceChannelId).toBe("v-1");
+    expect(normalized?.isScreenSharing).toBe(true);
     expect(normalized?.isServerMuted).toBe(true);
     expect(normalized?.isServerDeafened).toBe(false);
   });
@@ -271,10 +276,14 @@ describe("voicePresence:timestamp ordering", () => {
         userId: "u-9",
         previousVoiceChannelId: "v-1",
         currentVoiceChannelId: "v-2",
+        isScreenSharing: true,
+        isMuted: true,
         occurredAtUtc: "2026-04-04T10:00:01.000Z",
       }),
     );
-    expect(signature).toBe("u-9|v-1|v-2|2026-04-04T10:00:01.000Z");
+    expect(signature).toBe(
+      "u-9|v-1|v-2|screen|muted|undeafened|server-unmuted|server-undeafened|2026-04-04T10:00:01.000Z",
+    );
   });
 });
 

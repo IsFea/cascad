@@ -76,7 +76,9 @@ export function EmbeddedVoiceStage(props: {
   voiceMessages: Array<{ userId: string; username: string; content: string; createdAtUtc: string }>;
   onSendVoiceMessage: (content: string) => Promise<void>;
   onSpeakingUsersChange: (userIds: Set<string>) => void;
-  onActiveParticipantsChange: (participants: Array<{ userId: string; username: string }>) => void;
+  onActiveParticipantsChange: (
+    participants: Array<{ userId: string; username: string; isScreenSharing: boolean }>,
+  ) => void;
   onControlsChange: (controls: EmbeddedVoiceControls | null) => void;
   isInActiveVoiceChannel: boolean;
   canModerate: boolean;
@@ -325,6 +327,7 @@ export function EmbeddedVoiceStage(props: {
       media.participants.map((participant) => ({
         userId: participant.identity,
         username: participant.displayName,
+        isScreenSharing: participant.isScreenSharing,
       })),
     );
   }, [media.participants, props.onActiveParticipantsChange]);

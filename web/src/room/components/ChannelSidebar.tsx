@@ -201,6 +201,7 @@ export function ChannelSidebar(props: {
                   <List dense disablePadding sx={{ ml: 2.45, mt: 0.2, mb: 0 }}>
                     {participants.map((participant) => {
                       const isSpeaking = props.speakingUserIds.has(participant.userId);
+                      const isScreenSharing = participant.isScreenSharing;
                       const voiceStatusIndicator = resolveVoiceStatusIndicator(participant);
                       return (
                         <ListItemButton
@@ -262,6 +263,20 @@ export function ChannelSidebar(props: {
                                 >
                                   {participant.username}
                                 </Typography>
+                                {isScreenSharing && (
+                                  <Tooltip title="Screen sharing">
+                                    <Box
+                                      component="span"
+                                      sx={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        color: "secondary.light",
+                                      }}
+                                    >
+                                      <ScreenShareIcon sx={{ fontSize: 13 }} />
+                                    </Box>
+                                  </Tooltip>
+                                )}
                                 {voiceStatusIndicator && (
                                   <Tooltip title={voiceStatusIndicator.tooltip}>
                                     <Box

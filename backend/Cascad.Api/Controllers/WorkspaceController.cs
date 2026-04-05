@@ -96,6 +96,13 @@ public sealed class WorkspaceController : ControllerBase
         var moderationByUser = await _db.VoiceModerationStates
             .Where(x => x.WorkspaceId == workspace.Id)
             .ToDictionaryAsync(x => x.UserId, cancellationToken);
+        var activeScreenShares = await _db.VoiceStreamPublications
+            .Where(x => x.Channel.WorkspaceId == workspace.Id && x.IsActive)
+            .Select(x => new { x.UserId, x.ChannelId })
+            .ToListAsync(cancellationToken);
+        var screenShareByUserChannel = activeScreenShares
+            .Select(x => (x.UserId, x.ChannelId))
+            .ToHashSet();
 
         var voiceByUser = voiceSessions
             .GroupBy(x => x.UserId)
@@ -125,6 +132,8 @@ public sealed class WorkspaceController : ControllerBase
                         member.Role,
                         member.User.AvatarUrl,
                         voiceState?.ChannelId,
+                        voiceState is not null &&
+                        screenShareByUserChannel.Contains((member.UserId, voiceState.ChannelId)),
                         effectiveMuted,
                         effectiveDeafened,
                         serverMuted,

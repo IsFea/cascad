@@ -793,6 +793,7 @@ function WorkspaceShell(props: {
   const patchSelfWorkspaceVoiceState = useCallback(
     (next: {
       connectedVoiceChannelId?: string | null;
+      isScreenSharing?: boolean;
       isMuted?: boolean;
       isDeafened?: boolean;
       isServerMuted?: boolean;
@@ -815,6 +816,7 @@ function WorkspaceShell(props: {
             next.connectedVoiceChannelId !== undefined
               ? next.connectedVoiceChannelId
               : member.connectedVoiceChannelId,
+          isScreenSharing: next.isScreenSharing ?? member.isScreenSharing,
           isMuted: next.isMuted ?? member.isMuted,
           isDeafened: next.isDeafened ?? member.isDeafened,
           isServerMuted: next.isServerMuted ?? member.isServerMuted,
@@ -823,6 +825,7 @@ function WorkspaceShell(props: {
 
         if (
           updated.connectedVoiceChannelId === member.connectedVoiceChannelId &&
+          updated.isScreenSharing === member.isScreenSharing &&
           updated.isMuted === member.isMuted &&
           updated.isDeafened === member.isDeafened &&
           updated.isServerMuted === member.isServerMuted &&
@@ -984,7 +987,7 @@ function WorkspaceShell(props: {
   };
 
   const applyActiveVoiceRoster = useCallback(
-    (participants: Array<{ userId: string; username: string }>) => {
+    (participants: Array<{ userId: string; username: string; isScreenSharing: boolean }>) => {
       const activeVoiceChannelId = voiceSessionRef.current?.room.id ?? null;
       const activeWorkspaceId = workspaceIdRef.current;
       if (!activeVoiceChannelId || !activeWorkspaceId) {
@@ -1051,6 +1054,7 @@ function WorkspaceShell(props: {
             return {
               ...member,
               connectedVoiceChannelId: null,
+              isScreenSharing: false,
               isMuted: false,
               isDeafened: false,
               isServerMuted: false,
@@ -1073,6 +1077,7 @@ function WorkspaceShell(props: {
             role: "User",
             avatarUrl: null,
             connectedVoiceChannelId: activeVoiceChannelId,
+            isScreenSharing: false,
             isMuted: false,
             isDeafened: false,
             isServerMuted: false,
@@ -1377,6 +1382,7 @@ function WorkspaceShell(props: {
             role: "User",
             avatarUrl: event.avatarUrl,
             connectedVoiceChannelId: event.currentVoiceChannelId,
+            isScreenSharing: event.isScreenSharing,
             isMuted: event.isMuted,
             isDeafened: event.isDeafened,
             isServerMuted: event.isServerMuted,
@@ -1422,6 +1428,7 @@ function WorkspaceShell(props: {
         });
         patchSelfWorkspaceVoiceState({
           connectedVoiceChannelId: null,
+          isScreenSharing: false,
           isMuted: false,
           isDeafened: false,
           isServerMuted: false,
@@ -1704,6 +1711,7 @@ function WorkspaceShell(props: {
     });
     patchSelfWorkspaceVoiceState({
       connectedVoiceChannelId: null,
+      isScreenSharing: false,
       isMuted: false,
       isDeafened: false,
       isServerMuted: false,
@@ -1788,6 +1796,7 @@ function WorkspaceShell(props: {
     setConnectedVoiceChannelId(null);
     patchSelfWorkspaceVoiceState({
       connectedVoiceChannelId: null,
+      isScreenSharing: false,
       isMuted: false,
       isDeafened: false,
       isServerMuted: false,
@@ -1831,6 +1840,7 @@ function WorkspaceShell(props: {
         clearVoiceClientState();
         patchSelfWorkspaceVoiceState({
           connectedVoiceChannelId: null,
+          isScreenSharing: false,
           isMuted: false,
           isDeafened: false,
           isServerMuted: false,

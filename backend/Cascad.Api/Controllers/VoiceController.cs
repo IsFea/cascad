@@ -148,6 +148,7 @@ public sealed class VoiceController : ControllerBase
                 avatarUrl: user.AvatarUrl,
                 previousVoiceChannelId: previousVoiceChannelId,
                 currentVoiceChannelId: channel.Id,
+                isScreenSharing: false,
                 isMuted: effectiveState.IsMuted,
                 isDeafened: effectiveState.IsDeafened,
                 isServerMuted: effectiveState.IsServerMuted,
@@ -264,6 +265,7 @@ public sealed class VoiceController : ControllerBase
                         avatarUrl: user.AvatarUrl,
                         previousVoiceChannelId: session.ChannelId,
                         currentVoiceChannelId: null,
+                        isScreenSharing: false,
                         isMuted: effectiveState.IsMuted,
                         isDeafened: effectiveState.IsDeafened,
                         isServerMuted: effectiveState.IsServerMuted,
@@ -373,6 +375,9 @@ public sealed class VoiceController : ControllerBase
                 selfMuted: session.IsMuted,
                 selfDeafened: session.IsDeafened,
                 moderationAfter);
+            var isScreenSharing = await _db.VoiceStreamPublications.AnyAsync(
+                x => x.ChannelId == session.ChannelId && x.UserId == userId && x.IsActive,
+                cancellationToken);
 
             await BroadcastVoicePresenceChangedAsync(
                 workspaceId: channel.WorkspaceId,
@@ -381,6 +386,7 @@ public sealed class VoiceController : ControllerBase
                 avatarUrl: user.AvatarUrl,
                 previousVoiceChannelId: session.ChannelId,
                 currentVoiceChannelId: session.ChannelId,
+                isScreenSharing: isScreenSharing,
                 isMuted: effectiveState.IsMuted,
                 isDeafened: effectiveState.IsDeafened,
                 isServerMuted: effectiveState.IsServerMuted,
@@ -524,6 +530,9 @@ public sealed class VoiceController : ControllerBase
             selfMuted: targetSession?.IsMuted ?? false,
             selfDeafened: targetSession?.IsDeafened ?? false,
             moderationAfter);
+        var isScreenSharing = targetSession is not null && await _db.VoiceStreamPublications.AnyAsync(
+            x => x.ChannelId == targetSession.ChannelId && x.UserId == request.TargetUserId && x.IsActive,
+            cancellationToken);
 
         await BroadcastVoicePresenceChangedAsync(
             workspaceId: channel.WorkspaceId,
@@ -532,6 +541,7 @@ public sealed class VoiceController : ControllerBase
             avatarUrl: targetUser.AvatarUrl,
             previousVoiceChannelId: targetSession?.ChannelId,
             currentVoiceChannelId: targetSession?.ChannelId,
+            isScreenSharing: isScreenSharing,
             isMuted: effectiveState.IsMuted,
             isDeafened: effectiveState.IsDeafened,
             isServerMuted: effectiveState.IsServerMuted,
@@ -600,6 +610,7 @@ public sealed class VoiceController : ControllerBase
                     avatarUrl: user.AvatarUrl,
                     previousVoiceChannelId: request.ChannelId,
                     currentVoiceChannelId: null,
+                    isScreenSharing: false,
                     isMuted: effectiveState.IsMuted,
                     isDeafened: effectiveState.IsDeafened,
                     isServerMuted: effectiveState.IsServerMuted,
@@ -699,6 +710,9 @@ public sealed class VoiceController : ControllerBase
             selfMuted: targetSession?.IsMuted ?? false,
             selfDeafened: targetSession?.IsDeafened ?? false,
             moderationAfter);
+        var isScreenSharing = targetSession is not null && await _db.VoiceStreamPublications.AnyAsync(
+            x => x.ChannelId == targetSession.ChannelId && x.UserId == request.TargetUserId && x.IsActive,
+            cancellationToken);
 
         await BroadcastVoicePresenceChangedAsync(
             workspaceId: channel.WorkspaceId,
@@ -707,6 +721,7 @@ public sealed class VoiceController : ControllerBase
             avatarUrl: targetUser.AvatarUrl,
             previousVoiceChannelId: targetSession?.ChannelId,
             currentVoiceChannelId: targetSession?.ChannelId,
+            isScreenSharing: isScreenSharing,
             isMuted: effectiveState.IsMuted,
             isDeafened: effectiveState.IsDeafened,
             isServerMuted: effectiveState.IsServerMuted,
@@ -775,6 +790,13 @@ public sealed class VoiceController : ControllerBase
             existing.IsActive = true;
             existing.LastSeenAtUtc = now;
             await _db.SaveChangesAsync(cancellationToken);
+            await BroadcastVoiceChannelStateChangedAsync(
+                workspaceId: channel.WorkspaceId,
+                channelId: channel.Id,
+                userId: userId,
+                isScreenSharing: true,
+                occurredAtUtc: now,
+                cancellationToken: cancellationToken);
             var activeCount = await _db.VoiceStreamPublications.CountAsync(
                 x => x.ChannelId == channel.Id && x.IsActive,
                 cancellationToken);
@@ -802,6 +824,13 @@ public sealed class VoiceController : ControllerBase
             LastSeenAtUtc = now
         });
         await _db.SaveChangesAsync(cancellationToken);
+        await BroadcastVoiceChannelStateChangedAsync(
+            workspaceId: channel.WorkspaceId,
+            channelId: channel.Id,
+            userId: userId,
+            isScreenSharing: true,
+            occurredAtUtc: now,
+            cancellationToken: cancellationToken);
 
         return Ok(new StreamPermitResponse(true, null, count + 1, channel.MaxConcurrentStreams));
     }
@@ -846,6 +875,23 @@ public sealed class VoiceController : ControllerBase
         {
             _db.VoiceStreamPublications.Remove(stream);
             await _db.SaveChangesAsync(cancellationToken);
+            if (session is not null)
+            {
+                var workspaceId = await _db.Channels
+                    .Where(x => x.Id == request.ChannelId)
+                    .Select(x => (Guid?)x.WorkspaceId)
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (workspaceId.HasValue)
+                {
+                    await BroadcastVoiceChannelStateChangedAsync(
+                        workspaceId: workspaceId.Value,
+                        channelId: request.ChannelId,
+                        userId: userId,
+                        isScreenSharing: false,
+                        occurredAtUtc: DateTime.UtcNow,
+                        cancellationToken: cancellationToken);
+                }
+            }
         }
 
         return NoContent();
@@ -950,6 +996,53 @@ public sealed class VoiceController : ControllerBase
             serverDeafened);
     }
 
+    private async Task BroadcastVoiceChannelStateChangedAsync(
+        Guid workspaceId,
+        Guid channelId,
+        Guid userId,
+        bool isScreenSharing,
+        DateTime occurredAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var session = await _db.VoiceSessions.SingleOrDefaultAsync(
+            x => x.ChannelId == channelId && x.UserId == userId,
+            cancellationToken);
+        if (session is null)
+        {
+            return;
+        }
+
+        var user = await _db.Users
+            .Where(x => x.Id == userId)
+            .Select(x => new { x.Username, x.AvatarUrl })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (user is null)
+        {
+            return;
+        }
+
+        var moderationState = await GetVoiceModerationStateAsync(workspaceId, userId, cancellationToken);
+        var effectiveState = ResolveEffectiveVoiceState(
+            selfMuted: session.IsMuted,
+            selfDeafened: session.IsDeafened,
+            moderationState);
+
+        await BroadcastVoicePresenceChangedAsync(
+            workspaceId: workspaceId,
+            userId: userId,
+            username: user.Username,
+            avatarUrl: user.AvatarUrl,
+            previousVoiceChannelId: channelId,
+            currentVoiceChannelId: channelId,
+            isScreenSharing: isScreenSharing,
+            isMuted: effectiveState.IsMuted,
+            isDeafened: effectiveState.IsDeafened,
+            isServerMuted: effectiveState.IsServerMuted,
+            isServerDeafened: effectiveState.IsServerDeafened,
+            occurredAtUtc: occurredAtUtc,
+            cancellationToken: cancellationToken);
+    }
+
     private async Task BroadcastVoicePresenceChangedAsync(
         Guid workspaceId,
         Guid userId,
@@ -957,6 +1050,7 @@ public sealed class VoiceController : ControllerBase
         string? avatarUrl,
         Guid? previousVoiceChannelId,
         Guid? currentVoiceChannelId,
+        bool isScreenSharing,
         bool isMuted,
         bool isDeafened,
         bool isServerMuted,
@@ -971,6 +1065,7 @@ public sealed class VoiceController : ControllerBase
             avatarUrl,
             previousVoiceChannelId,
             currentVoiceChannelId,
+            isScreenSharing,
             isMuted,
             isDeafened,
             isServerMuted,

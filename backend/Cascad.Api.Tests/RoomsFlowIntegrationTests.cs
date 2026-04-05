@@ -751,6 +751,99 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
         }
     }
 
+    [Fact]
+    public async Task VoiceChannelPresenceChanged_ShouldBroadcastScreenShareState_OnPermitAndRelease()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await RegisterAndApproveAsync(adminClient, "streamalice");
+        await RegisterAndApproveAsync(adminClient, "streambob");
+
+        var aliceClient = _factory.CreateClient();
+        var aliceToken = await LoginAsync(aliceClient, "streamalice", "streamalice12345");
+        aliceClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", aliceToken);
+        var aliceWorkspace = await aliceClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(aliceWorkspace);
+        var voiceChannelId = aliceWorkspace!.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+        var aliceUserId = aliceWorkspace.CurrentUser.Id;
+
+        var connectResponse = await aliceClient.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest { ChannelId = voiceChannelId });
+        connectResponse.EnsureSuccessStatusCode();
+        var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+        Assert.NotNull(connectPayload);
+
+        var bobClient = _factory.CreateClient();
+        var bobToken = await LoginAsync(bobClient, "streambob", "streambob12345");
+        bobClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bobToken);
+        var bobWorkspace = await bobClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(bobWorkspace);
+        var eventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var hubConnection = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(bobToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+
+        hubConnection.On<VoicePresenceChangedEventDto>(
+            "voiceChannelPresenceChanged",
+            payload => eventChannel.Writer.TryWrite(payload));
+
+        await hubConnection.StartAsync();
+        try
+        {
+            await hubConnection.InvokeAsync("JoinVoiceChannel", voiceChannelId);
+
+            var permitResponse = await aliceClient.PostAsJsonAsync(
+                "/api/voice/streams/permit",
+                new StreamPermitRequest
+                {
+                    ChannelId = voiceChannelId,
+                    SessionInstanceId = connectPayload!.SessionInstanceId
+                });
+            permitResponse.EnsureSuccessStatusCode();
+
+            var shareStartedEvent = await WaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x =>
+                    x.UserId == aliceUserId &&
+                    x.PreviousVoiceChannelId == voiceChannelId &&
+                    x.CurrentVoiceChannelId == voiceChannelId &&
+                    x.IsScreenSharing);
+            Assert.True(shareStartedEvent.IsScreenSharing);
+
+            var releaseResponse = await aliceClient.PostAsJsonAsync(
+                "/api/voice/streams/release",
+                new StreamPermitRequest
+                {
+                    ChannelId = voiceChannelId,
+                    SessionInstanceId = connectPayload.SessionInstanceId
+                });
+            releaseResponse.EnsureSuccessStatusCode();
+
+            var shareStoppedEvent = await WaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x =>
+                    x.UserId == aliceUserId &&
+                    x.PreviousVoiceChannelId == voiceChannelId &&
+                    x.CurrentVoiceChannelId == voiceChannelId &&
+                    !x.IsScreenSharing);
+            Assert.False(shareStoppedEvent.IsScreenSharing);
+        }
+        finally
+        {
+            await hubConnection.StopAsync();
+            await hubConnection.DisposeAsync();
+        }
+    }
+
     private static async Task<string> LoginAsync(HttpClient client, string username, string password)
     {
         var response = await client.PostAsJsonAsync(
@@ -829,6 +922,7 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
         string? AvatarUrl,
         Guid? PreviousVoiceChannelId,
         Guid? CurrentVoiceChannelId,
+        bool IsScreenSharing,
         bool IsMuted,
         bool IsDeafened,
         bool IsServerMuted,

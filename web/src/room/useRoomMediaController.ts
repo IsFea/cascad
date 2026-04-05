@@ -702,6 +702,18 @@ export function useRoomMediaController(
   };
 
   const syncParticipants = (room: Room) => {
+    const hasActiveScreenSharePublication = (participant: {
+      getTrackPublication: (source: Track.Source) => { isMuted?: boolean } | undefined;
+      isScreenShareEnabled?: boolean;
+    }): boolean => {
+      const publication = participant.getTrackPublication(Track.Source.ScreenShare);
+      if (!publication) {
+        return Boolean(participant.isScreenShareEnabled);
+      }
+
+      return publication.isMuted !== true;
+    };
+
     const remoteParticipants = Array.from(room.remoteParticipants.values());
     const remoteIdentitySet = new Set(remoteParticipants.map((item) => item.identity));
     const localIdentity = room.localParticipant.identity;
@@ -735,7 +747,7 @@ export function useRoomMediaController(
       identity: localIdentity,
       displayName: resolveDisplayName(room.localParticipant, session.user.username),
       isLocal: true,
-      isScreenSharing: room.localParticipant.isScreenShareEnabled,
+      isScreenSharing: hasActiveScreenSharePublication(room.localParticipant),
       voiceVolume: DEFAULT_CHANNEL_VOLUME,
       streamVolume: DEFAULT_CHANNEL_VOLUME,
       voiceMutedLocal: mutedRef.current,
@@ -769,7 +781,7 @@ export function useRoomMediaController(
           identity,
           displayName: resolveDisplayName(participant),
           isLocal: false,
-          isScreenSharing: participant.isScreenShareEnabled,
+          isScreenSharing: hasActiveScreenSharePublication(participant),
           voiceVolume: voiceVolumeMapRef.current[identity],
           streamVolume: streamVolumeMapRef.current[identity],
           voiceMutedLocal: Boolean(voiceMuteMapRef.current[identity]),
@@ -1059,11 +1071,13 @@ export function useRoomMediaController(
     const onLocalTrackPublished = (publication: { track?: { source?: Track.Source } }) => {
       if (publication.track?.source === Track.Source.ScreenShare) {
         setSharing(true);
+        syncParticipants(room);
       }
     };
     const onLocalTrackUnpublished = (publication: { track?: { source?: Track.Source } }) => {
       if (publication.track?.source === Track.Source.ScreenShare) {
         setSharing(false);
+        syncParticipants(room);
       }
     };
 

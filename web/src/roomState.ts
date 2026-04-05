@@ -18,6 +18,9 @@ export type StreamLayoutState = {
 
 export type StreamLayoutAction =
   | {
+      type: "reset";
+    }
+  | {
       type: "set-mode";
       mode: StreamLayoutMode;
     }
@@ -118,6 +121,8 @@ export function streamLayoutReducer(
   action: StreamLayoutAction,
 ): StreamLayoutState {
   switch (action.type) {
+    case "reset":
+      return createInitialLayoutState();
     case "set-mode": {
       if (action.mode === "theater") {
         if (state.mode === "theater") {

@@ -2413,6 +2413,7 @@ function WorkspaceShell(props: {
           >
             {voiceSession ? (
               <EmbeddedVoiceStage
+                key={voiceSession.sessionInstanceId || voiceSession.room.id}
                 session={voiceSession}
                 appToken={props.token}
                 selfDeafened={selfDeafened}

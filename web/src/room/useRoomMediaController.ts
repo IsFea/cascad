@@ -885,6 +885,18 @@ export function useRoomMediaController(
   };
 
   useEffect(() => {
+    setConnected(false);
+    setSharing(false);
+    setError(null);
+    setParticipants([]);
+    setScreenTracks([]);
+    setHiddenStreamsByIdentity({});
+    dispatchLayout({ type: "reset" });
+    activeSpeakersRef.current.clear();
+    voiceActivityRef.current.clear();
+    screenAudioActivityRef.current.clear();
+    pendingAudioUnlockRef.current = false;
+
     const room = new Room({
       adaptiveStream: true,
       dynacast: true,
@@ -1157,7 +1169,13 @@ export function useRoomMediaController(
       closeBoostContext();
       roomRef.current = null;
     };
-  }, [session.rtcToken, session.rtcUrl, session.user.username]);
+  }, [
+    session.room.id,
+    session.rtcToken,
+    session.rtcUrl,
+    session.sessionInstanceId,
+    session.user.username,
+  ]);
 
   const patchParticipant = (identity: string, patch: Partial<ParticipantState>) => {
     setParticipants((previous) =>

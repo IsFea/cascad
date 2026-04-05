@@ -58,6 +58,15 @@ describe("roomState:streamLayoutReducer", () => {
 
     expect(resolveFocusedStreamSid(state, ["stream-b", "stream-c"])).toBe("stream-b");
   });
+
+  it("resets layout state to defaults", () => {
+    let state = createInitialLayoutState();
+    state = streamLayoutReducer(state, { type: "set-mode", mode: "focus" });
+    state = streamLayoutReducer(state, { type: "set-focus", sid: "stream-a" });
+    state = streamLayoutReducer(state, { type: "reset" });
+
+    expect(state).toEqual(createInitialLayoutState());
+  });
 });
 
 describe("roomState:hiddenStreams", () => {

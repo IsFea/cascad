@@ -440,6 +440,23 @@ describe("voicePresence:optimistic updates", () => {
     expect(update.rollback).toEqual(current);
   });
 
+  it("forces muted state when self-deafened is requested", () => {
+    const current = {
+      isMuted: false,
+      isDeafened: false,
+      isServerMuted: false,
+      isServerDeafened: false,
+    } as const;
+
+    const update = createOptimisticSelfVoiceStateUpdate(current, false, true, false);
+    expect(update.optimistic).toEqual({
+      isMuted: true,
+      isDeafened: true,
+      isServerMuted: false,
+      isServerDeafened: false,
+    });
+  });
+
   it("applies optimistic moderation patch with effective state recalculation", () => {
     const current = {
       isMuted: false,

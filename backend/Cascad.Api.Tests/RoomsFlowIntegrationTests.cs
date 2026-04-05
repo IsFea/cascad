@@ -761,6 +761,45 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
+    public async Task SelfDeafen_ShouldReportMutedEffectiveState()
+    {
+        var client = _factory.CreateClient();
+        var adminToken = await LoginAsync(client, "admin", "admin12345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        var workspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(workspace);
+        var userId = workspace!.CurrentUser.Id;
+        var voiceChannelId = workspace.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+
+        var connectResponse = await client.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest { ChannelId = voiceChannelId });
+        connectResponse.EnsureSuccessStatusCode();
+        var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+        Assert.NotNull(connectPayload);
+
+        var selfStateResponse = await client.PostAsJsonAsync(
+            "/api/voice/self-state",
+            new VoiceSelfStateRequest
+            {
+                ChannelId = voiceChannelId,
+                SessionInstanceId = connectPayload!.SessionInstanceId,
+                IsMuted = false,
+                IsDeafened = true
+            });
+        selfStateResponse.EnsureSuccessStatusCode();
+
+        var reloadedWorkspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(reloadedWorkspace);
+        var reloadedMember = reloadedWorkspace!.Members.Single(x => x.UserId == userId);
+        Assert.True(reloadedMember.IsDeafened);
+        Assert.True(reloadedMember.IsMuted);
+        Assert.False(reloadedMember.IsServerMuted);
+        Assert.False(reloadedMember.IsServerDeafened);
+    }
+
+    [Fact]
     public async Task VoiceChannelPresenceChanged_ShouldBeDelivered_OnModerationWithoutChannelTransition_WithoutWorkspaceBroadcast()
     {
         var adminClient = _factory.CreateClient();

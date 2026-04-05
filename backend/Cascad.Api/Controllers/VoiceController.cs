@@ -1024,7 +1024,7 @@ public sealed class VoiceController : ControllerBase
         var serverMuted = moderationState?.IsServerMuted ?? false;
         var serverDeafened = moderationState?.IsServerDeafened ?? false;
         var effectiveDeafened = selfDeafened || serverDeafened;
-        var effectiveMuted = selfMuted || serverMuted || serverDeafened;
+        var effectiveMuted = selfMuted || selfDeafened || serverMuted || serverDeafened;
         return new EffectiveVoiceState(
             effectiveMuted,
             effectiveDeafened,

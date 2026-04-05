@@ -445,11 +445,20 @@ export function ChannelSidebar(props: {
             {connectedVoiceName ?? "Voice channel"}
           </Typography>
           <Stack direction="row" spacing={0.45}>
-            <Tooltip title={props.selfMuted ? "Unmute" : "Mute"}>
+            <Tooltip
+              title={
+                props.selfDeafened && props.selfMuted
+                  ? "Undeafen to unmute"
+                  : props.selfMuted
+                    ? "Unmute"
+                    : "Mute"
+              }
+            >
               <IconButton
                 size="small"
                 aria-label={props.selfMuted ? "Unmute" : "Mute"}
                 onClick={props.onToggleSelfMute}
+                disabled={props.selfDeafened && props.selfMuted}
               >
                 {props.selfMuted ? <MicOffIcon fontSize="small" color="error" /> : <MicIcon fontSize="small" />}
               </IconButton>

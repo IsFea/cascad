@@ -222,10 +222,11 @@ export function createOptimisticSelfVoiceStateUpdate(
   optimistic: VoiceSelfStateSnapshot;
   rollback: VoiceSelfStateSnapshot;
 } {
+  const effectiveMuted = nextDeafened ? true : nextMuted;
   const optimistic: VoiceSelfStateSnapshot = {
-    isMuted: nextMuted,
+    isMuted: effectiveMuted,
     isDeafened: nextDeafened,
-    isServerMuted: isAdmin && !nextMuted ? false : current.isServerMuted,
+    isServerMuted: isAdmin && !effectiveMuted ? false : current.isServerMuted,
     isServerDeafened: isAdmin && !nextDeafened ? false : current.isServerDeafened,
   };
   return {

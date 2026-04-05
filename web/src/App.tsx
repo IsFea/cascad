@@ -2624,6 +2624,8 @@ function WorkspaceShell(props: {
       return;
     }
 
+    const requestedMuted = nextDeafened ? true : nextMuted;
+
     const optimisticUpdate = createOptimisticSelfVoiceStateUpdate(
       {
         isMuted: selfMuted,
@@ -2631,7 +2633,7 @@ function WorkspaceShell(props: {
         isServerMuted: selfServerMuted,
         isServerDeafened: selfServerDeafened,
       },
-      nextMuted,
+      requestedMuted,
       nextDeafened,
       isCurrentUserAdmin,
     );
@@ -2654,7 +2656,7 @@ function WorkspaceShell(props: {
         {
           channelId: selfStateChannelId,
           sessionInstanceId: voiceSession?.sessionInstanceId ?? "",
-          isMuted: nextMuted,
+          isMuted: requestedMuted,
           isDeafened: nextDeafened,
         },
         props.token,
@@ -2689,6 +2691,11 @@ function WorkspaceShell(props: {
 
   const toggleSelfMute = async () => {
     const nextMuted = !selfMuted;
+    if (selfDeafened && !nextMuted) {
+      setInfoMessage("Undeafen before unmuting your microphone.");
+      return;
+    }
+
     const blockedByServerModeration =
       !isCurrentUserAdmin &&
       !nextMuted &&
@@ -3009,8 +3016,9 @@ function WorkspaceShell(props: {
       return;
     }
 
-    void voiceControlActionsRef.current.setMuted(selfMuted).catch(() => undefined);
-  }, [selfMuted, voiceSession?.sessionInstanceId]);
+    const effectiveLocalMute = selfMuted || selfDeafened || selfServerDeafened;
+    void voiceControlActionsRef.current.setMuted(effectiveLocalMute).catch(() => undefined);
+  }, [selfMuted, selfDeafened, selfServerDeafened, voiceSession?.sessionInstanceId]);
 
   if (loading) {
     return (

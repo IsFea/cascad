@@ -49,6 +49,8 @@ export type AudioAnalyserHandle = {
   cleanup: () => Promise<void>;
 };
 
+export type BoostLifecycleState = "none" | "pending" | "active" | "degraded";
+
 export type AudioBinding = {
   sid: string;
   identity: string;
@@ -59,10 +61,13 @@ export type AudioBinding = {
   analyser?: AudioAnalyserHandle;
   activityIntervalId?: number;
   activeUntilMs?: number;
-  boostSupported: boolean;
+  boostLifecycle: BoostLifecycleState;
   boostContext?: AudioContext;
-  boostSourceNode?: MediaElementAudioSourceNode;
+  boostSourceTrackId?: string;
+  boostSourceStream?: MediaStream;
+  boostSourceNode?: MediaStreamAudioSourceNode;
   boostGainNode?: GainNode;
+  lastBoostFailureAtMs?: number;
 };
 
 export type ElementSize = {

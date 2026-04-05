@@ -199,6 +199,10 @@ function isVoiceServerModeratedError(reason: unknown) {
   return reason instanceof ApiProblemError && reason.status === 403 && reason.code === "VOICE_SERVER_MODERATED";
 }
 
+function isVoiceSessionUnavailableError(reason: unknown) {
+  return reason instanceof ApiProblemError && (reason.status === 404 || reason.status === 409);
+}
+
 async function apiCall<TResponse>(
   path: string,
   method: "GET" | "POST" | "PUT" | "DELETE",
@@ -644,6 +648,8 @@ function WorkspaceShell(props: {
   const previousVoiceEngineConnectedRef = useRef(false);
   const selectedTextChannelIdRef = useRef<string | null>(null);
   const connectedVoiceChannelIdRef = useRef<string | null>(null);
+  const voiceSessionRef = useRef<JoinRoomResponse | null>(null);
+  const suppressWorkspaceVoiceSyncRef = useRef(false);
   const workspaceIdRef = useRef<string | null>(null);
   const currentUserIdRef = useRef(props.currentUser.id);
   const joinedWorkspaceIdRef = useRef<string | null>(null);
@@ -672,6 +678,10 @@ function WorkspaceShell(props: {
     workspaceIdRef.current = workspaceId;
     currentUserIdRef.current = props.currentUser.id;
   }, [selectedTextChannelId, connectedVoiceChannelId, workspaceId, props.currentUser.id]);
+
+  useEffect(() => {
+    voiceSessionRef.current = voiceSession;
+  }, [voiceSession]);
 
   useEffect(() => {
     return () => {
@@ -767,7 +777,17 @@ function WorkspaceShell(props: {
       current && data.channels.some((x) => x.id === current) ? current : firstVoice,
     );
 
-    setConnectedVoiceChannelId(data.connectedVoiceChannelId);
+    setConnectedVoiceChannelId((current) => {
+      if (suppressWorkspaceVoiceSyncRef.current && !voiceSessionRef.current) {
+        return current;
+      }
+
+      if (current && voiceSessionRef.current?.room.id === current) {
+        return current;
+      }
+
+      return data.connectedVoiceChannelId;
+    });
 
     const me = data.members.find((x) => x.userId === props.currentUser.id);
     setSelfMuted(me?.isMuted ?? false);
@@ -894,12 +914,16 @@ function WorkspaceShell(props: {
       return;
     }
 
+    if (suppressWorkspaceVoiceSyncRef.current && !voiceSession) {
+      return;
+    }
+
     if (voiceSession?.room.id === connectedVoiceChannelId) {
       return;
     }
 
     void ensureVoiceSession(connectedVoiceChannelId).catch(() => undefined);
-  }, [connectedVoiceChannelId]);
+  }, [connectedVoiceChannelId, voiceSession]);
 
   useEffect(() => {
     setLiveVoiceMessages([]);
@@ -1063,7 +1087,9 @@ function WorkspaceShell(props: {
         event.previousVoiceChannelId === connectedVoiceChannelIdRef.current &&
         event.currentVoiceChannelId === null
       ) {
-        clearVoiceClientState();
+        // Presence events can arrive out-of-order during reconnect races.
+        // Let heartbeat/workspace sync decide whether local voice state is truly gone.
+        void loadWorkspace().catch(() => undefined);
       }
 
       const earconType = resolveVoiceEarconType(
@@ -1115,6 +1141,17 @@ function WorkspaceShell(props: {
     }
 
     let disposed = false;
+    let intervalId = 0;
+
+    const stopHeartbeat = () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      if (intervalId) {
+        window.clearInterval(intervalId);
+      }
+    };
 
     const sendHeartbeat = async () => {
       try {
@@ -1133,26 +1170,31 @@ function WorkspaceShell(props: {
         }
 
         if (isVoiceSessionReplacedError(reason)) {
+          stopHeartbeat();
           handleVoiceSessionReplaced();
           return;
         }
 
-        if (reason instanceof ApiProblemError && reason.status === 404) {
-          clearVoiceClientState();
+        if (isVoiceSessionUnavailableError(reason)) {
+          stopHeartbeat();
+          clearVoiceClientState(undefined, { suppressWorkspaceVoiceSync: true });
+          void loadWorkspace().catch(() => undefined);
         }
       }
     };
 
     void sendHeartbeat();
-    const interval = window.setInterval(() => {
+    intervalId = window.setInterval(() => {
       void sendHeartbeat();
     }, 10000);
 
     return () => {
       disposed = true;
-      window.clearInterval(interval);
+      if (intervalId) {
+        window.clearInterval(intervalId);
+      }
     };
-  }, [connectedVoiceChannelId, props.token, voiceSession?.sessionInstanceId]);
+  }, [connectedVoiceChannelId, loadWorkspace, props.token, voiceSession?.sessionInstanceId]);
 
   useEffect(() => {
     if (!connectedVoiceChannelId || !voiceSession?.sessionInstanceId) {
@@ -1252,7 +1294,16 @@ function WorkspaceShell(props: {
     await loadWorkspace();
   };
 
-  const clearVoiceClientState = (notice?: string) => {
+  const clearVoiceClientState = (
+    notice?: string,
+    options?: {
+      suppressWorkspaceVoiceSync?: boolean;
+    },
+  ) => {
+    if (options?.suppressWorkspaceVoiceSync) {
+      suppressWorkspaceVoiceSyncRef.current = true;
+    }
+
     setConnectedVoiceChannelId(null);
     setVoiceSession(null);
     voiceControlActionsRef.current = null;
@@ -1270,11 +1321,14 @@ function WorkspaceShell(props: {
   };
 
   const handleVoiceSessionReplaced = () => {
-    clearVoiceClientState("Voice session moved to another tab.");
+    clearVoiceClientState("Voice session moved to another tab.", {
+      suppressWorkspaceVoiceSync: true,
+    });
     void loadWorkspace().catch(() => undefined);
   };
 
   const connectVoice = async (channelId: string) => {
+    suppressWorkspaceVoiceSyncRef.current = false;
     const connected = await apiCall<VoiceConnectResponse>(
       "/voice/connect",
       "POST",
@@ -1295,13 +1349,20 @@ function WorkspaceShell(props: {
     }
 
     const sessionInstanceId = voiceSession?.sessionInstanceId ?? "";
-    await apiCall<void>(
-      "/voice/disconnect",
-      "POST",
-      { channelId: connectedVoiceChannelId, sessionInstanceId },
-      props.token,
-    );
+    try {
+      await apiCall<void>(
+        "/voice/disconnect",
+        "POST",
+        { channelId: connectedVoiceChannelId, sessionInstanceId },
+        props.token,
+      );
+    } catch (reason) {
+      if (!isVoiceSessionUnavailableError(reason)) {
+        throw reason;
+      }
+    }
 
+    suppressWorkspaceVoiceSyncRef.current = true;
     clearVoiceClientState();
     await loadWorkspace();
   };

@@ -35,12 +35,24 @@ import {
 } from "../roomState";
 import { JoinRoomResponse } from "../types";
 import { AudioBinding, ParticipantState, ScreenTrackState } from "./types";
+import {
+  BoostContextState,
+  isBoostSourceStale,
+  shouldKeepElementMuted,
+  shouldRetryBoostResume,
+  shouldUseBoostOutput,
+} from "./audioBoost";
 import { resolveDisplayName } from "./utils";
 
 const DEFAULT_CHANNEL_VOLUME = 1;
 const VOICE_ACTIVE_HOLD_MS = 320;
 const STREAM_ACTIVE_HOLD_MS = 740;
 const SCREEN_SHARE_CONNECT_TIMEOUT_MS = 4000;
+const BOOST_COMPRESSOR_THRESHOLD_DB = -18;
+const BOOST_COMPRESSOR_KNEE_DB = 16;
+const BOOST_COMPRESSOR_RATIO = 4;
+const BOOST_COMPRESSOR_ATTACK_SEC = 0.003;
+const BOOST_COMPRESSOR_RELEASE_SEC = 0.22;
 
 function isEngineNotConnectedTimeoutError(reason: unknown): boolean {
   if (!(reason instanceof Error)) {
@@ -48,6 +60,19 @@ function isEngineNotConnectedTimeoutError(reason: unknown): boolean {
   }
 
   return reason.message.toLowerCase().includes("engine not connected");
+}
+
+function isAudioAutoplayBlockedError(reason: unknown): boolean {
+  if (!(reason instanceof Error)) {
+    return false;
+  }
+
+  const message = reason.message.toLowerCase();
+  return (
+    message.includes("audiocontext was not allowed to start") ||
+    message.includes("user gesture") ||
+    message.includes("autoplay")
+  );
 }
 
 type UseRoomMediaControllerResult = {
@@ -131,6 +156,9 @@ export function useRoomMediaController(
   const roomRef = useRef<Room | null>(null);
   const localAudioRef = useRef<LocalAudioTrack | null>(null);
   const audioBindingsRef = useRef<Map<string, AudioBinding>>(new Map());
+  const boostContextRef = useRef<AudioContext | null>(null);
+  const boostCompressorRef = useRef<DynamicsCompressorNode | null>(null);
+  const boostStateListenerRef = useRef<(() => void) | null>(null);
 
   const selectedInputRef = useRef("");
   const selectedOutputRef = useRef("");
@@ -150,6 +178,37 @@ export function useRoomMediaController(
   const localVoiceAnalyserRef = useRef<ReturnType<typeof createAudioAnalyser> | null>(null);
   const localVoiceActivityIntervalIdRef = useRef<number | null>(null);
   const localVoiceActiveUntilMsRef = useRef<number | undefined>(undefined);
+  const pendingAudioUnlockRef = useRef(false);
+
+  useEffect(() => {
+    const retryStartAudio = () => {
+      if (!pendingAudioUnlockRef.current) {
+        return;
+      }
+
+      const room = roomRef.current;
+      if (!room) {
+        return;
+      }
+
+      void room
+        .startAudio()
+        .then(() => {
+          pendingAudioUnlockRef.current = false;
+        })
+        .catch(() => {
+          // keep waiting for the next user gesture
+        });
+    };
+
+    window.addEventListener("pointerdown", retryStartAudio);
+    window.addEventListener("keydown", retryStartAudio);
+
+    return () => {
+      window.removeEventListener("pointerdown", retryStartAudio);
+      window.removeEventListener("keydown", retryStartAudio);
+    };
+  }, []);
 
   const waitForRoomConnected = (room: Room, timeoutMs = SCREEN_SHARE_CONNECT_TIMEOUT_MS) => {
     if (room.state === ConnectionState.Connected) {
@@ -261,64 +320,178 @@ export function useRoomMediaController(
     });
   };
 
-  const setupBoostPath = (binding: AudioBinding) => {
-    if (binding.boostSupported || selectedOutputRef.current) {
+  const teardownBoostBinding = (
+    binding: AudioBinding,
+    lifecycle: AudioBinding["boostLifecycle"] = "none",
+  ) => {
+    try {
+      binding.boostSourceNode?.disconnect();
+      binding.boostGainNode?.disconnect();
+    } catch {
+      // best-effort cleanup
+    }
+
+    binding.boostLifecycle = lifecycle;
+    binding.boostContext = undefined;
+    binding.boostSourceTrackId = undefined;
+    binding.boostSourceStream = undefined;
+    binding.boostSourceNode = undefined;
+    binding.boostGainNode = undefined;
+  };
+
+  const closeBoostContext = () => {
+    const context = boostContextRef.current;
+    if (!context) {
       return;
+    }
+
+    const onStateChange = boostStateListenerRef.current;
+    if (onStateChange) {
+      context.removeEventListener("statechange", onStateChange);
+      boostStateListenerRef.current = null;
+    }
+
+    boostContextRef.current = null;
+    boostCompressorRef.current = null;
+    if (context.state !== "closed") {
+      void context.close().catch(() => {
+        // ignore close failures
+      });
+    }
+  };
+
+  const ensureBoostContext = (): AudioContext | null => {
+    if (selectedOutputRef.current) {
+      return null;
+    }
+
+    const existing = boostContextRef.current;
+    if (existing && existing.state !== "closed") {
+      return existing;
     }
 
     const Ctx = (window.AudioContext ??
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
 
     if (!Ctx) {
-      return;
+      return null;
     }
 
     try {
       const context = new Ctx();
-      const sourceNode = context.createMediaElementSource(binding.element);
-      const gainNode = context.createGain();
-      sourceNode.connect(gainNode);
-      gainNode.connect(context.destination);
+      const compressor = context.createDynamicsCompressor();
+      compressor.threshold.value = BOOST_COMPRESSOR_THRESHOLD_DB;
+      compressor.knee.value = BOOST_COMPRESSOR_KNEE_DB;
+      compressor.ratio.value = BOOST_COMPRESSOR_RATIO;
+      compressor.attack.value = BOOST_COMPRESSOR_ATTACK_SEC;
+      compressor.release.value = BOOST_COMPRESSOR_RELEASE_SEC;
+      compressor.connect(context.destination);
 
-      binding.boostContext = context;
-      binding.boostSourceNode = sourceNode;
-      binding.boostGainNode = gainNode;
-      binding.boostSupported = true;
-      binding.element.muted = true;
+      const onStateChange = () => {
+        for (const binding of audioBindingsRef.current.values()) {
+          applyBindingAudioSettings(binding);
+        }
+      };
 
-      void context.resume().catch(() => {
-        // autoplay policy may block resume until user interaction
-      });
+      boostCompressorRef.current = compressor;
+      context.addEventListener("statechange", onStateChange);
+      boostStateListenerRef.current = onStateChange;
+      boostContextRef.current = context;
+      return context;
     } catch {
-      binding.boostSupported = false;
-      binding.boostContext = undefined;
-      binding.boostSourceNode = undefined;
-      binding.boostGainNode = undefined;
+      return null;
     }
   };
 
+  const setupBoostPath = (binding: AudioBinding): boolean => {
+    const nowMs = Date.now();
+    const context = ensureBoostContext();
+    if (!context) {
+      teardownBoostBinding(binding, "degraded");
+      binding.lastBoostFailureAtMs = nowMs;
+      return false;
+    }
+
+    const contextState = context.state as BoostContextState;
+    if (contextState === "closed") {
+      teardownBoostBinding(binding, "degraded");
+      binding.lastBoostFailureAtMs = nowMs;
+      closeBoostContext();
+      return false;
+    }
+
+    if (contextState !== "running") {
+      binding.boostLifecycle = "pending";
+      if (shouldRetryBoostResume(contextState, nowMs, binding.lastBoostFailureAtMs)) {
+        binding.lastBoostFailureAtMs = nowMs;
+        void context
+          .resume()
+          .then(() => {
+            binding.lastBoostFailureAtMs = undefined;
+            applyBindingAudioSettings(binding);
+          })
+          .catch(() => {
+            binding.boostLifecycle = "degraded";
+          });
+      }
+      return false;
+    }
+
+    if (binding.boostContext && binding.boostContext !== context) {
+      teardownBoostBinding(binding, "none");
+    }
+
+    const mediaTrack = binding.track.mediaStreamTrack;
+    if (!mediaTrack || mediaTrack.readyState === "ended") {
+      teardownBoostBinding(binding, "degraded");
+      binding.lastBoostFailureAtMs = nowMs;
+      return false;
+    }
+
+    if (isBoostSourceStale(binding.boostSourceTrackId, mediaTrack)) {
+      teardownBoostBinding(binding, "none");
+    }
+
+    if (!binding.boostSourceNode || !binding.boostGainNode) {
+      try {
+        const compressorNode = boostCompressorRef.current ?? context.destination;
+        const sourceStream = new MediaStream([mediaTrack]);
+        const sourceNode = context.createMediaStreamSource(sourceStream);
+        const gainNode = context.createGain();
+        sourceNode.connect(gainNode);
+        gainNode.connect(compressorNode);
+
+        binding.boostContext = context;
+        binding.boostSourceTrackId = mediaTrack.id;
+        binding.boostSourceStream = sourceStream;
+        binding.boostSourceNode = sourceNode;
+        binding.boostGainNode = gainNode;
+      } catch {
+        teardownBoostBinding(binding, "degraded");
+        binding.lastBoostFailureAtMs = nowMs;
+        return false;
+      }
+    }
+
+    binding.boostLifecycle = "active";
+    binding.lastBoostFailureAtMs = undefined;
+
+    return shouldUseBoostOutput({
+      contextState: context.state as BoostContextState,
+      hasGainNode: Boolean(binding.boostGainNode),
+      sourceStale: isBoostSourceStale(binding.boostSourceTrackId, mediaTrack),
+    });
+  };
+
   const disableBoostPath = (binding: AudioBinding) => {
-    if (!binding.boostSupported) {
-      return;
+    if (binding.boostLifecycle !== "none") {
+      teardownBoostBinding(binding, "none");
     }
-
-    try {
-      binding.boostSourceNode?.disconnect();
-      binding.boostGainNode?.disconnect();
-      void binding.boostContext?.close();
-    } catch {
-      // best-effort cleanup
-    }
-
-    binding.boostSupported = false;
-    binding.boostContext = undefined;
-    binding.boostSourceNode = undefined;
-    binding.boostGainNode = undefined;
     binding.element.muted = false;
   };
 
   const applyOutputDevice = async (binding: AudioBinding) => {
-    if (binding.boostSupported) {
+    if (binding.boostLifecycle === "active") {
       return;
     }
 
@@ -363,38 +536,38 @@ export function useRoomMediaController(
     const isOutputSuppressed = playbackSuppressedRef.current;
 
     const shouldTryBoost = requestedVolume > 1 && !selectedOutputRef.current;
-    if (shouldTryBoost) {
-      setupBoostPath(binding);
-    }
-
-    if (selectedOutputRef.current && binding.boostSupported) {
+    if (!shouldTryBoost && binding.boostLifecycle !== "none") {
       disableBoostPath(binding);
     }
 
-    if (binding.boostSupported && binding.boostContext?.state === "closed") {
+    if (selectedOutputRef.current && binding.boostLifecycle !== "none") {
       disableBoostPath(binding);
     }
 
-    if (binding.boostSupported && binding.boostContext?.state === "suspended") {
-      void binding.boostContext.resume().catch(() => {
-        // autoplay policies can reject resume without user gesture
-      });
-    }
-
-    const boostReady =
-      binding.boostSupported &&
-      binding.boostContext?.state === "running" &&
-      Boolean(binding.boostGainNode);
+    const boostReady = shouldTryBoost ? setupBoostPath(binding) : false;
     const levels = resolvePlaybackLevels(requestedVolume, boostReady);
+    const contextState = (binding.boostContext?.state ?? "closed") as BoostContextState;
+    const sourceStale = isBoostSourceStale(
+      binding.boostSourceTrackId,
+      binding.track.mediaStreamTrack,
+    );
 
-    if (boostReady && binding.boostGainNode) {
+    if (
+      boostReady &&
+      binding.boostGainNode &&
+      shouldKeepElementMuted(binding, contextState, sourceStale)
+    ) {
       binding.element.muted = true;
       binding.boostGainNode.gain.value = isMuted || isOutputSuppressed ? 0 : levels.gainValue;
-    } else {
-      binding.element.muted = false;
-      binding.element.volume = isMuted || isOutputSuppressed ? 0 : levels.elementVolume;
-      void applyOutputDevice(binding);
+      return;
     }
+
+    if (binding.boostGainNode) {
+      binding.boostGainNode.gain.value = 0;
+    }
+    binding.element.muted = false;
+    binding.element.volume = isMuted || isOutputSuppressed ? 0 : levels.elementVolume;
+    void applyOutputDevice(binding);
   };
 
   const applyAudioSettings = (identity: string, source?: AudioChannel) => {
@@ -465,6 +638,10 @@ export function useRoomMediaController(
     binding.isActive = false;
     binding.activeUntilMs = undefined;
     recomputeIdentitySourceActivity(binding.identity, binding.source);
+
+    if (audioBindingsRef.current.size === 0) {
+      closeBoostContext();
+    }
   };
 
   const cleanupParticipantAudio = (identity: string) => {
@@ -711,12 +888,12 @@ export function useRoomMediaController(
       if (track.kind === Track.Kind.Audio) {
         const source = getAudioChannelForSource(track.source, publication.source);
         const sid = track.sid ?? `${participant.identity}-${source}-${Date.now()}`;
+        const remoteAudioTrack = track as RemoteAudioTrack;
 
         if (!audioBindingsRef.current.has(sid)) {
           const element = new Audio();
           element.autoplay = true;
 
-          const remoteAudioTrack = track as RemoteAudioTrack;
           remoteAudioTrack.attach(element);
 
           const binding: AudioBinding = {
@@ -726,7 +903,7 @@ export function useRoomMediaController(
             track: remoteAudioTrack,
             element,
             isActive: false,
-            boostSupported: false,
+            boostLifecycle: "none",
           };
 
           try {
@@ -762,6 +939,12 @@ export function useRoomMediaController(
 
           audioBindingsRef.current.set(binding.sid, binding);
           applyBindingAudioSettings(binding);
+        } else {
+          const existing = audioBindingsRef.current.get(sid);
+          if (existing) {
+            existing.track = remoteAudioTrack;
+            applyBindingAudioSettings(existing);
+          }
         }
       }
 
@@ -907,7 +1090,15 @@ export function useRoomMediaController(
 
         await refreshDevices(true);
         await createAndPublishMicrophoneTrack(room, selectedInputRef.current || undefined);
-        await room.startAudio();
+        try {
+          await room.startAudio();
+          pendingAudioUnlockRef.current = false;
+        } catch (reason) {
+          if (!isAudioAutoplayBlockedError(reason)) {
+            throw reason;
+          }
+          pendingAudioUnlockRef.current = true;
+        }
 
         syncParticipants(room);
         setConnected(true);
@@ -948,6 +1139,8 @@ export function useRoomMediaController(
       }
 
       audioBindingsRef.current.clear();
+      pendingAudioUnlockRef.current = false;
+      closeBoostContext();
       roomRef.current = null;
     };
   }, [session.rtcToken, session.rtcUrl, session.user.username]);
@@ -1169,6 +1362,7 @@ export function useRoomMediaController(
       for (const binding of audioBindingsRef.current.values()) {
         disableBoostPath(binding);
       }
+      closeBoostContext();
     }
 
     const room = roomRef.current;

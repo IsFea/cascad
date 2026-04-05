@@ -189,14 +189,14 @@ describe("roomState:resolvePlaybackLevels", () => {
   it("applies nonlinear boost at 150% when supported", () => {
     const boosted = resolvePlaybackLevels(1.5, true);
     expect(boosted.elementVolume).toBe(1);
-    expect(boosted.gainValue).toBe(1.7);
+    expect(boosted.gainValue).toBeCloseTo(1.525, 3);
     expect(boosted.boosted).toBe(true);
   });
 
-  it("caps nonlinear boost to x3 at 200% when supported", () => {
+  it("caps nonlinear boost to x2.4 at 200% when supported", () => {
     const boosted = resolvePlaybackLevels(2, true);
     expect(boosted.elementVolume).toBe(1);
-    expect(boosted.gainValue).toBe(3);
+    expect(boosted.gainValue).toBe(2.4);
     expect(boosted.boosted).toBe(true);
   });
 

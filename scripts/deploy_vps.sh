@@ -78,7 +78,7 @@ POSTGRES_PASSWORD="$(prompt "Postgres password" "$(random_secret 20)")"
 
 APP_JWT_SIGNING_KEY="$(prompt "App JWT signing key" "$(random_secret 64)")"
 LIVEKIT_API_KEY="$(prompt "LiveKit API key" "devkey")"
-LIVEKIT_API_SECRET="$(prompt "LiveKit API secret" "$(random_secret 48)")"
+LIVEKIT_API_SECRET="$(prompt "LiveKit API secret" "DEV_LIVEKIT_SECRET_KEY_1234567890123456")"
 
 SEED_INVITE_DEFAULT="DEMO_INVITE_HOST_LOBBY"
 SEED_INVITE_TOKEN="$(prompt "Seed invite token" "$SEED_INVITE_DEFAULT")"
@@ -222,7 +222,84 @@ if [[ "$CONFIGURE_UFW" == "true" ]] && command -v ufw >/dev/null 2>&1; then
 fi
 
 LIVEKIT_CFG="$REMOTE_DIR/infra/livekit.yaml"
-if [[ -f "$LIVEKIT_CFG" ]] && grep -q "use_external_ip:" "$LIVEKIT_CFG"; then
+if [[ ! -f "$LIVEKIT_CFG" ]]; then
+  echo "Missing $LIVEKIT_CFG" >&2
+  exit 1
+fi
+
+LIVEKIT_API_KEY="$(grep -E '^LIVEKIT_API_KEY=' "$REMOTE_DIR/.env" | head -n1 | cut -d= -f2- || true)"
+LIVEKIT_API_SECRET="$(grep -E '^LIVEKIT_API_SECRET=' "$REMOTE_DIR/.env" | head -n1 | cut -d= -f2- || true)"
+if [[ -z "${LIVEKIT_API_KEY:-}" || -z "${LIVEKIT_API_SECRET:-}" ]]; then
+  echo "Missing LIVEKIT_API_KEY/LIVEKIT_API_SECRET in $REMOTE_DIR/.env" >&2
+  exit 1
+fi
+
+tmp_livekit="$LIVEKIT_CFG.tmp"
+awk -v lk_key="$LIVEKIT_API_KEY" -v lk_secret="$LIVEKIT_API_SECRET" '
+  BEGIN {
+    in_keys = 0
+    keys_written = 0
+  }
+  function write_keys() {
+    print "keys:"
+    print "  " lk_key ": " lk_secret
+    keys_written = 1
+  }
+  {
+    if ($0 ~ /^keys:[[:space:]]*$/) {
+      write_keys()
+      in_keys = 1
+      next
+    }
+    if (in_keys == 1) {
+      if ($0 ~ /^[^[:space:]]/ && $0 !~ /^$/) {
+        in_keys = 0
+        print $0
+      }
+      next
+    }
+    print $0
+  }
+  END {
+    if (keys_written == 0) {
+      write_keys()
+    }
+  }
+' "$LIVEKIT_CFG" > "$tmp_livekit"
+mv "$tmp_livekit" "$LIVEKIT_CFG"
+
+pair="$(awk '
+  BEGIN { in_keys = 0 }
+  /^keys:[[:space:]]*$/ {
+    in_keys = 1
+    next
+  }
+  in_keys && /^[^[:space:]]/ {
+    in_keys = 0
+  }
+  in_keys && /^[[:space:]]+[^:#[:space:]][^:]*:[[:space:]]*/ {
+    line = $0
+    sub(/^[[:space:]]+/, "", line)
+    key = line
+    sub(/:.*/, "", key)
+    secret = line
+    sub(/^[^:]+:[[:space:]]*/, "", secret)
+    print key "\t" secret
+    exit
+  }
+' "$LIVEKIT_CFG")"
+yaml_key="${pair%%$'\t'*}"
+yaml_secret="${pair#*$'\t'}"
+
+if [[ -z "$pair" || "$yaml_key" != "$LIVEKIT_API_KEY" || "$yaml_secret" != "$LIVEKIT_API_SECRET" ]]; then
+  echo "LiveKit key/secret mismatch after sync preflight." >&2
+  echo "env key: $LIVEKIT_API_KEY" >&2
+  echo "yaml key: $yaml_key" >&2
+  echo "Fix: sync $LIVEKIT_CFG from $REMOTE_DIR/.env, then restart livekit and api." >&2
+  exit 1
+fi
+
+if grep -q "use_external_ip:" "$LIVEKIT_CFG"; then
   sed -i.bak 's/use_external_ip:.*/use_external_ip: true/' "$LIVEKIT_CFG"
 fi
 

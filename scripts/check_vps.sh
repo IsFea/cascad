@@ -100,6 +100,35 @@ run_remote_check \
   "API env values inside container" \
   "sudo docker inspect cascad-api --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'LiveKit__RtcUrl|Client__BaseUrl|Cors__AllowedOrigins__0'"
 
+echo
+info "LiveKit API secret parity (api env vs infra/livekit.yaml)"
+if output=$("${SSH_BASE[@]}" "set -euo pipefail; \
+API_ENV=\$(sudo docker inspect cascad-api --format '{{range .Config.Env}}{{println .}}{{end}}'); \
+API_KEY=\$(printf '%s\n' \"\$API_ENV\" | awk -F= '/^LiveKit__ApiKey=/{print substr(\$0,index(\$0,\"=\")+1); exit}'); \
+API_SECRET=\$(printf '%s\n' \"\$API_ENV\" | awk -F= '/^LiveKit__ApiSecret=/{print substr(\$0,index(\$0,\"=\")+1); exit}'); \
+PAIR=\$(awk 'BEGIN { in_keys = 0 } /^keys:[[:space:]]*$/{ in_keys = 1; next } in_keys && /^[^[:space:]]/{ in_keys = 0 } in_keys && /^[[:space:]]+[^:#[:space:]][^:]*:[[:space:]]*/ { line = \$0; sub(/^[[:space:]]+/, \"\", line); key = line; sub(/:.*/, \"\", key); secret = line; sub(/^[^:]+:[[:space:]]*/, \"\", secret); print key \"|\" secret; exit }' '$REMOTE_DIR/infra/livekit.yaml'); \
+YAML_KEY=\${PAIR%%|*}; \
+YAML_SECRET=\${PAIR#*|}; \
+echo \"api key: \$API_KEY\"; \
+echo \"yaml key: \$YAML_KEY\"; \
+if [ -z \"\$API_KEY\" ] || [ -z \"\$API_SECRET\" ] || [ -z \"\$PAIR\" ] || [ -z \"\$YAML_KEY\" ] || [ -z \"\$YAML_SECRET\" ]; then \
+  echo 'Unable to parse LiveKit credentials from API env or livekit.yaml'; \
+  exit 1; \
+fi; \
+if [ \"\$API_KEY\" != \"\$YAML_KEY\" ] || [ \"\$API_SECRET\" != \"\$YAML_SECRET\" ]; then \
+  echo 'Mismatch detected: API token signer and LiveKit validator secrets differ.'; \
+  exit 1; \
+fi"); then
+  [[ -n "$output" ]] && echo "$output"
+  ok "LiveKit API secret parity (api env vs infra/livekit.yaml)"
+else
+  [[ -n "$output" ]] && echo "$output"
+  fail "LiveKit API secret parity (api env vs infra/livekit.yaml)"
+  FAILURES=$((FAILURES + 1))
+  echo "Fix (resync + restart):"
+  echo "cd '$REMOTE_DIR' && LIVEKIT_API_KEY=\$(grep -E '^LIVEKIT_API_KEY=' .env | head -n1 | cut -d= -f2-) && LIVEKIT_API_SECRET=\$(grep -E '^LIVEKIT_API_SECRET=' .env | head -n1 | cut -d= -f2-) && awk -v lk_key=\"\$LIVEKIT_API_KEY\" -v lk_secret=\"\$LIVEKIT_API_SECRET\" 'BEGIN{in_keys=0;keys_written=0} function write_keys(){print \"keys:\"; print \"  \" lk_key \": \" lk_secret; keys_written=1} {if(\$0 ~ /^keys:[[:space:]]*$/){write_keys(); in_keys=1; next} if(in_keys==1){if(\$0 ~ /^[^[:space:]]/ && \$0 !~ /^$/){in_keys=0; print \$0} next} print \$0} END{if(keys_written==0){write_keys()}}' infra/livekit.yaml > infra/livekit.yaml.tmp && mv infra/livekit.yaml.tmp infra/livekit.yaml && sudo docker compose restart livekit api"
+fi
+
 run_remote_check \
   "LiveKit external IP flag" \
   "grep -n 'use_external_ip' '$REMOTE_DIR/infra/livekit.yaml'"

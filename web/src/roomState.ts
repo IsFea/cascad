@@ -93,7 +93,7 @@ export const DEFAULT_STREAM_START_OPTIONS: StreamStartOptions = {
 };
 
 export const STREAM_VIDEO_OBJECT_FIT = "contain" as const;
-const MAX_BOOST_GAIN = 3;
+const MAX_BOOST_GAIN = 2.4;
 
 export function createInitialLayoutState(): StreamLayoutState {
   return {
@@ -608,7 +608,7 @@ export function resolvePlaybackLevels(
     const boostedGain =
       requested <= 1
         ? requested
-        : 1 + 0.8 * overdrive + 1.2 * overdrive * overdrive;
+        : 1 + 0.7 * overdrive + 0.7 * overdrive * overdrive;
 
     return {
       elementVolume: 1,

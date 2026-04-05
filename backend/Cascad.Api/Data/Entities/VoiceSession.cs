@@ -16,6 +16,8 @@ public sealed class VoiceSession
 
     public string SessionInstanceId { get; set; } = string.Empty;
 
+    public string TabInstanceId { get; set; } = string.Empty;
+
     public DateTime ConnectedAtUtc { get; set; } = DateTime.UtcNow;
 
     public DateTime LastSeenAtUtc { get; set; } = DateTime.UtcNow;

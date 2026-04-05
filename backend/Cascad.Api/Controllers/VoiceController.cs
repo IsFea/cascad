@@ -20,6 +20,7 @@ namespace Cascad.Api.Controllers;
 public sealed class VoiceController : ControllerBase
 {
     private const string VoiceSessionReplacedCode = "VOICE_SESSION_REPLACED";
+    private const string VoiceSessionActiveInAnotherTabCode = "VOICE_SESSION_ACTIVE_IN_ANOTHER_TAB";
     private const string VoiceServerModeratedCode = "VOICE_SERVER_MODERATED";
 
     private readonly AppDbContext _db;
@@ -48,6 +49,7 @@ public sealed class VoiceController : ControllerBase
     [HttpPost("connect")]
     [ProducesResponseType<VoiceConnectResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<VoiceConnectResponse>> Connect(
@@ -86,6 +88,20 @@ public sealed class VoiceController : ControllerBase
         var existingSessions = await _db.VoiceSessions
             .Where(x => x.UserId == userId)
             .ToListAsync(cancellationToken);
+        var requestedTabInstanceId = request.TabInstanceId?.Trim();
+        var hasRequestedTabInstanceId = !string.IsNullOrWhiteSpace(requestedTabInstanceId);
+        if (!request.AllowTakeover && hasRequestedTabInstanceId)
+        {
+            var hasActiveSessionInAnotherTab = existingSessions.Any(
+                x => !string.IsNullOrWhiteSpace(x.TabInstanceId) &&
+                     !string.Equals(x.TabInstanceId, requestedTabInstanceId, StringComparison.Ordinal));
+            if (hasActiveSessionInAnotherTab)
+            {
+                return VoiceSessionActiveInAnotherTab();
+            }
+        }
+
+        var current = existingSessions.SingleOrDefault(x => x.ChannelId == channel.Id);
         var previousVoiceChannelId = existingSessions
             .OrderByDescending(x => x.LastSeenAtUtc)
             .Select(x => (Guid?)x.ChannelId)
@@ -112,7 +128,14 @@ public sealed class VoiceController : ControllerBase
 
         var now = DateTime.UtcNow;
         var sessionInstanceId = Guid.NewGuid().ToString("N");
-        var current = existingSessions.SingleOrDefault(x => x.ChannelId == channel.Id);
+        var tabInstanceId = hasRequestedTabInstanceId
+            ? requestedTabInstanceId!
+            : current?.TabInstanceId;
+        if (string.IsNullOrWhiteSpace(tabInstanceId))
+        {
+            tabInstanceId = Guid.NewGuid().ToString("N");
+        }
+
         if (current is null)
         {
             _db.VoiceSessions.Add(new VoiceSession
@@ -122,6 +145,7 @@ public sealed class VoiceController : ControllerBase
                 IsMuted = false,
                 IsDeafened = false,
                 SessionInstanceId = sessionInstanceId,
+                TabInstanceId = tabInstanceId,
                 ConnectedAtUtc = now,
                 LastSeenAtUtc = now
             });
@@ -129,6 +153,7 @@ public sealed class VoiceController : ControllerBase
         else
         {
             current.SessionInstanceId = sessionInstanceId;
+            current.TabInstanceId = tabInstanceId;
             current.LastSeenAtUtc = now;
         }
 
@@ -933,6 +958,17 @@ public sealed class VoiceController : ControllerBase
             Status = StatusCodes.Status409Conflict
         };
         details.Extensions["code"] = VoiceSessionReplacedCode;
+        return StatusCode(StatusCodes.Status409Conflict, details);
+    }
+
+    private ObjectResult VoiceSessionActiveInAnotherTab()
+    {
+        var details = new ProblemDetails
+        {
+            Title = "Voice session is active in another tab.",
+            Status = StatusCodes.Status409Conflict
+        };
+        details.Extensions["code"] = VoiceSessionActiveInAnotherTabCode;
         return StatusCode(StatusCodes.Status409Conflict, details);
     }
 

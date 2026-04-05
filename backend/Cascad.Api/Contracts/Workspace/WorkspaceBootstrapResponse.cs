@@ -6,5 +6,6 @@ public sealed record WorkspaceBootstrapResponse(
     WorkspaceDto Workspace,
     UserDto CurrentUser,
     Guid? ConnectedVoiceChannelId,
+    string? ConnectedVoiceTabInstanceId,
     IReadOnlyList<ChannelDto> Channels,
     IReadOnlyList<WorkspaceMemberDto> Members);

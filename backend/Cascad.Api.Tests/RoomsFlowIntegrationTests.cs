@@ -528,6 +528,108 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
+    public async Task Connect_ShouldReturnConflict_WhenVoiceSessionIsActiveInAnotherTab_WithoutTakeover()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await RegisterAndApproveAsync(adminClient, "tabblockeduser");
+
+        var client = _factory.CreateClient();
+        var token = await LoginAsync(client, "tabblockeduser", "tabblockeduser12345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var workspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(workspace);
+        var voiceChannelId = workspace!.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+
+        var firstConnect = await client.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest
+            {
+                ChannelId = voiceChannelId,
+                TabInstanceId = "tab-a",
+                AllowTakeover = false
+            });
+        firstConnect.EnsureSuccessStatusCode();
+
+        var secondConnect = await client.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest
+            {
+                ChannelId = voiceChannelId,
+                TabInstanceId = "tab-b",
+                AllowTakeover = false
+            });
+        Assert.Equal(HttpStatusCode.Conflict, secondConnect.StatusCode);
+        var body = await secondConnect.Content.ReadAsStringAsync();
+        Assert.Contains("VOICE_SESSION_ACTIVE_IN_ANOTHER_TAB", body, StringComparison.OrdinalIgnoreCase);
+
+        var reloaded = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(reloaded);
+        Assert.Equal(voiceChannelId, reloaded!.ConnectedVoiceChannelId);
+        Assert.Equal("tab-a", reloaded.ConnectedVoiceTabInstanceId);
+    }
+
+    [Fact]
+    public async Task Connect_ShouldTakeOverSession_WhenAllowTakeoverIsTrue_AndOldSessionGetsReplaced()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await RegisterAndApproveAsync(adminClient, "tabtakeoveruser");
+
+        var client = _factory.CreateClient();
+        var token = await LoginAsync(client, "tabtakeoveruser", "tabtakeoveruser12345");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var workspace = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(workspace);
+        var voiceChannelId = workspace!.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+
+        var firstConnectResponse = await client.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest
+            {
+                ChannelId = voiceChannelId,
+                TabInstanceId = "tab-a",
+                AllowTakeover = false
+            });
+        firstConnectResponse.EnsureSuccessStatusCode();
+        var firstConnectPayload = await firstConnectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+        Assert.NotNull(firstConnectPayload);
+
+        var secondConnectResponse = await client.PostAsJsonAsync(
+            "/api/voice/connect",
+            new VoiceConnectRequest
+            {
+                ChannelId = voiceChannelId,
+                TabInstanceId = "tab-b",
+                AllowTakeover = true
+            });
+        secondConnectResponse.EnsureSuccessStatusCode();
+        var secondConnectPayload = await secondConnectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+        Assert.NotNull(secondConnectPayload);
+        Assert.NotEqual(firstConnectPayload!.SessionInstanceId, secondConnectPayload!.SessionInstanceId);
+
+        var oldHeartbeat = await client.PostAsJsonAsync(
+            "/api/voice/heartbeat",
+            new VoiceHeartbeatRequest
+            {
+                ChannelId = voiceChannelId,
+                SessionInstanceId = firstConnectPayload.SessionInstanceId
+            });
+        Assert.Equal(HttpStatusCode.Conflict, oldHeartbeat.StatusCode);
+        var oldHeartbeatBody = await oldHeartbeat.Content.ReadAsStringAsync();
+        Assert.Contains("VOICE_SESSION_REPLACED", oldHeartbeatBody, StringComparison.OrdinalIgnoreCase);
+
+        var reloaded = await client.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(reloaded);
+        Assert.Equal(voiceChannelId, reloaded!.ConnectedVoiceChannelId);
+        Assert.Equal("tab-b", reloaded.ConnectedVoiceTabInstanceId);
+    }
+
+    [Fact]
     public async Task ServerModeration_ShouldPersistAcrossReconnect_AndBlockSelfClear_ForRegularUser()
     {
         var adminClient = _factory.CreateClient();

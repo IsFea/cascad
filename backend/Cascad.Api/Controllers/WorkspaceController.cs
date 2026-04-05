@@ -114,6 +114,7 @@ public sealed class WorkspaceController : ControllerBase
             new WorkspaceDto(workspace.Id, workspace.Name, workspace.CreatedAtUtc),
             ToUserDto(user),
             voiceByUser.TryGetValue(user.Id, out var selfVoice) ? selfVoice.ChannelId : null,
+            selfVoice?.TabInstanceId,
             channels.Select(ToChannelDto).ToList(),
             members
                 .Select(member =>

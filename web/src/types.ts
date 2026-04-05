@@ -74,6 +74,7 @@ export type WorkspaceBootstrapResponse = {
   workspace: WorkspaceDto;
   currentUser: UserDto;
   connectedVoiceChannelId: string | null;
+  connectedVoiceTabInstanceId: string | null;
   channels: ChannelDto[];
   members: WorkspaceMemberDto[];
 };

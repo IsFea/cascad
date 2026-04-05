@@ -67,6 +67,7 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
                 "IsMuted" boolean NOT NULL,
                 "IsDeafened" boolean NOT NULL,
                 "SessionInstanceId" character varying(80) NOT NULL,
+                "TabInstanceId" character varying(80) NOT NULL,
                 "ConnectedAtUtc" timestamp with time zone NOT NULL,
                 "LastSeenAtUtc" timestamp with time zone NOT NULL,
                 CONSTRAINT "PK_VoiceSessions" PRIMARY KEY ("ChannelId", "UserId"),
@@ -75,6 +76,7 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
             );
 
             ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "SessionInstanceId" character varying(80) NOT NULL DEFAULT '';
+            ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "TabInstanceId" character varying(80) NOT NULL DEFAULT '';
 
             CREATE TABLE IF NOT EXISTS "VoiceModerationStates" (
                 "WorkspaceId" uuid NOT NULL,

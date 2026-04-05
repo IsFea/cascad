@@ -98,6 +98,8 @@ const EARCON_GAIN_BOOST: Record<VoiceEarconType, number> = {
   disconnect: 1.65,
 };
 
+type VoiceTabMode = "idle" | "active" | "secondary";
+
 type EarconProfile = {
   frequencies: number[];
   noteMs: number;
@@ -205,12 +207,20 @@ function isVoiceSessionReplacedError(reason: unknown) {
   return reason instanceof ApiProblemError && reason.status === 409 && reason.code === "VOICE_SESSION_REPLACED";
 }
 
+function isVoiceSessionActiveInAnotherTabError(reason: unknown) {
+  return (
+    reason instanceof ApiProblemError &&
+    reason.status === 409 &&
+    reason.code === "VOICE_SESSION_ACTIVE_IN_ANOTHER_TAB"
+  );
+}
+
 function isVoiceServerModeratedError(reason: unknown) {
   return reason instanceof ApiProblemError && reason.status === 403 && reason.code === "VOICE_SERVER_MODERATED";
 }
 
 function isVoiceSessionUnavailableError(reason: unknown) {
-  return reason instanceof ApiProblemError && (reason.status === 404 || reason.status === 409);
+  return reason instanceof ApiProblemError && (reason.status === 404 || isVoiceSessionReplacedError(reason));
 }
 
 async function apiCall<TResponse>(
@@ -277,6 +287,22 @@ function mapVoiceToRoomSession(
     rtcUrl: voice.rtcUrl,
     sessionInstanceId: voice.sessionInstanceId,
   };
+}
+
+function resolveVoiceTabMode(
+  connectedVoiceChannelId: string | null,
+  connectedVoiceTabInstanceId: string | null,
+  currentTabInstanceId: string,
+): VoiceTabMode {
+  if (!connectedVoiceChannelId) {
+    return "idle";
+  }
+
+  if (!connectedVoiceTabInstanceId || connectedVoiceTabInstanceId === currentTabInstanceId) {
+    return "active";
+  }
+
+  return "secondary";
 }
 
 function getAudioContextConstructor(): typeof AudioContext | null {
@@ -605,6 +631,7 @@ function WorkspaceShell(props: {
   const [centerMode, setCenterMode] = useState<"text" | "voice">("text");
 
   const [connectedVoiceChannelId, setConnectedVoiceChannelId] = useState<string | null>(null);
+  const [voiceTabMode, setVoiceTabMode] = useState<VoiceTabMode>("idle");
   const [voiceSession, setVoiceSession] = useState<JoinRoomResponse | null>(null);
   const [voiceControlState, setVoiceControlState] = useState<{
     muted: boolean;
@@ -649,6 +676,7 @@ function WorkspaceShell(props: {
   const [createChannelSubmitting, setCreateChannelSubmitting] = useState(false);
   const [createChannelError, setCreateChannelError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [takeoverDialogOpen, setTakeoverDialogOpen] = useState(false);
   const [participantMenuRequest, setParticipantMenuRequest] = useState<ParticipantMenuRequest | null>(null);
 
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
@@ -927,13 +955,29 @@ function WorkspaceShell(props: {
 
       return data.connectedVoiceChannelId;
     });
+    const nextVoiceTabMode = resolveVoiceTabMode(
+      data.connectedVoiceChannelId,
+      data.connectedVoiceTabInstanceId,
+      tabInstanceId,
+    );
+    setVoiceTabMode((current) => {
+      if (voiceConnectRequestInFlightRef.current) {
+        return current;
+      }
+
+      if (suppressWorkspaceVoiceSyncRef.current && !voiceSessionRef.current) {
+        return current;
+      }
+
+      return nextVoiceTabMode;
+    });
 
     const me = data.members.find((x) => x.userId === props.currentUser.id);
     setSelfMuted(me?.isMuted ?? false);
     setSelfDeafened(me?.isDeafened ?? false);
     setSelfServerMuted(me?.isServerMuted ?? false);
     setSelfServerDeafened(me?.isServerDeafened ?? false);
-  }, [props.currentUser.id, props.token]);
+  }, [props.currentUser.id, props.token, tabInstanceId]);
 
   const loadApprovals = async () => {
     if (props.currentUser.role !== "Admin") {
@@ -1098,11 +1142,11 @@ function WorkspaceShell(props: {
     [props.currentUser.id],
   );
 
-  const ensureVoiceSession = async (channelId: string) => {
+  const ensureVoiceSession = async (channelId: string, allowTakeover = false) => {
     const connected = await apiCall<VoiceConnectResponse>(
       "/voice/connect",
       "POST",
-      { channelId, tabInstanceId },
+      { channelId, tabInstanceId, allowTakeover },
       props.token,
     );
 
@@ -1112,6 +1156,7 @@ function WorkspaceShell(props: {
 
     suppressWorkspaceVoiceSyncRef.current = false;
     setConnectedVoiceChannelId(connected.channelId);
+    setVoiceTabMode("active");
     setVoiceSession(mapVoiceToRoomSession(connected, props.currentUser, props.token));
     patchSelfWorkspaceVoiceState({
       connectedVoiceChannelId: connected.channelId,
@@ -1170,6 +1215,12 @@ function WorkspaceShell(props: {
 
   useEffect(() => {
     if (!connectedVoiceChannelId) {
+      setVoiceTabMode("idle");
+      setVoiceSession(null);
+      return;
+    }
+
+    if (voiceTabMode !== "active") {
       setVoiceSession(null);
       return;
     }
@@ -1202,9 +1253,17 @@ function WorkspaceShell(props: {
         return;
       }
 
+      if (isVoiceSessionActiveInAnotherTabError(reason)) {
+        setVoiceTabMode("secondary");
+        setVoiceSession(null);
+        setInfoMessage("Voice session is active in another tab. Use takeover to move it here.");
+        void loadWorkspace().catch(() => undefined);
+        return;
+      }
+
       setError(reason instanceof Error ? reason.message : "Voice connect failed");
     });
-  }, [connectedVoiceChannelId, voiceSession]);
+  }, [connectedVoiceChannelId, loadWorkspace, voiceSession, voiceTabMode]);
 
   useEffect(() => {
     setLiveVoiceMessages([]);
@@ -1541,7 +1600,7 @@ function WorkspaceShell(props: {
     void sendHeartbeat();
     intervalId = window.setInterval(() => {
       void sendHeartbeat();
-    }, 10000);
+    }, 15000);
 
     return () => {
       disposed = true;
@@ -1591,17 +1650,9 @@ function WorkspaceShell(props: {
       }).catch(() => undefined);
     };
 
-    const releaseOnHidden = () => {
-      if (document.visibilityState === "hidden") {
-        releaseOnPageHide();
-      }
-    };
-
-    document.addEventListener("visibilitychange", releaseOnHidden);
     window.addEventListener("pagehide", releaseOnPageHide);
     window.addEventListener("beforeunload", releaseOnPageHide);
     return () => {
-      document.removeEventListener("visibilitychange", releaseOnHidden);
       window.removeEventListener("pagehide", releaseOnPageHide);
       window.removeEventListener("beforeunload", releaseOnPageHide);
     };
@@ -1688,6 +1739,7 @@ function WorkspaceShell(props: {
     }
 
     setConnectedVoiceChannelId(null);
+    setVoiceTabMode("idle");
     setVoiceSession(null);
     voiceControlActionsRef.current = null;
     autoMutedByDeafenRef.current = false;
@@ -1720,10 +1772,11 @@ function WorkspaceShell(props: {
     void loadWorkspace().catch(() => undefined);
   };
 
-  const connectVoice = async (channelId: string) => {
+  const connectVoice = async (channelId: string, options?: { allowTakeover?: boolean }) => {
     const previousConnectedVoiceChannelId = connectedVoiceChannelIdRef.current;
     const previousSelectedVoiceChannelId = selectedVoiceChannelId;
     const previousVoiceSession = voiceSessionRef.current;
+    const previousVoiceTabMode = voiceTabMode;
     const intentSeq = ++voiceConnectionIntentSeqRef.current;
     voiceConnectRequestInFlightRef.current = true;
     suppressWorkspaceVoiceSyncRef.current = false;
@@ -1739,7 +1792,7 @@ function WorkspaceShell(props: {
       const connected = await apiCall<VoiceConnectResponse>(
         "/voice/connect",
         "POST",
-        { channelId, tabInstanceId },
+        { channelId, tabInstanceId, allowTakeover: options?.allowTakeover ?? false },
         props.token,
       );
 
@@ -1750,6 +1803,7 @@ function WorkspaceShell(props: {
       setConnectedVoiceChannelId(connected.channelId);
       setSelectedVoiceChannelId(connected.channelId);
       setCenterMode("voice");
+      setVoiceTabMode("active");
       setVoiceSession(mapVoiceToRoomSession(connected, props.currentUser, props.token));
       patchSelfWorkspaceVoiceState({
         connectedVoiceChannelId: connected.channelId,
@@ -1760,9 +1814,20 @@ function WorkspaceShell(props: {
         return;
       }
 
+      if (isVoiceSessionActiveInAnotherTabError(reason)) {
+        setConnectedVoiceChannelId(previousConnectedVoiceChannelId);
+        setSelectedVoiceChannelId(previousSelectedVoiceChannelId);
+        setVoiceSession(null);
+        setVoiceTabMode("secondary");
+        setInfoMessage("Voice session is active in another tab. Use takeover to move it here.");
+        void loadWorkspace().catch(() => undefined);
+        return;
+      }
+
       setConnectedVoiceChannelId(previousConnectedVoiceChannelId);
       setSelectedVoiceChannelId(previousSelectedVoiceChannelId);
       setVoiceSession(previousVoiceSession);
+      setVoiceTabMode(previousVoiceTabMode);
       patchSelfWorkspaceVoiceState({
         connectedVoiceChannelId: previousConnectedVoiceChannelId,
       });
@@ -1789,11 +1854,13 @@ function WorkspaceShell(props: {
       isServerMuted: selfServerMuted,
       isServerDeafened: selfServerDeafened,
     };
+    const previousVoiceTabMode = voiceTabMode;
     const sessionInstanceId = previousVoiceSession?.sessionInstanceId ?? "";
     const intentSeq = ++voiceConnectionIntentSeqRef.current;
     voiceConnectRequestInFlightRef.current = true;
     suppressWorkspaceVoiceSyncRef.current = true;
     setConnectedVoiceChannelId(null);
+    setVoiceTabMode("idle");
     patchSelfWorkspaceVoiceState({
       connectedVoiceChannelId: null,
       isScreenSharing: false,
@@ -1819,6 +1886,7 @@ function WorkspaceShell(props: {
         if (!isVoiceSessionUnavailableError(reason)) {
           suppressWorkspaceVoiceSyncRef.current = false;
           setConnectedVoiceChannelId(previousConnectedVoiceChannelId);
+          setVoiceTabMode(previousVoiceTabMode);
           setSelectedVoiceChannelId(previousConnectedVoiceChannelId);
           setVoiceSession(previousVoiceSession);
           setSelfMuted(previousSelfState.isMuted);
@@ -1838,6 +1906,7 @@ function WorkspaceShell(props: {
 
       if (intentSeq === voiceConnectionIntentSeqRef.current) {
         clearVoiceClientState();
+        setVoiceTabMode("idle");
         patchSelfWorkspaceVoiceState({
           connectedVoiceChannelId: null,
           isScreenSharing: false,
@@ -1853,6 +1922,15 @@ function WorkspaceShell(props: {
         voiceConnectRequestInFlightRef.current = false;
       }
     }
+  };
+
+  const takeOverVoiceSession = async () => {
+    const channelId = connectedVoiceChannelIdRef.current;
+    if (!channelId) {
+      return;
+    }
+
+    await connectVoice(channelId, { allowTakeover: true });
   };
 
   const applySelfState = async (nextMuted: boolean, nextDeafened: boolean) => {
@@ -2347,6 +2425,7 @@ function WorkspaceShell(props: {
           selectedTextChannelId={selectedTextChannelId}
           selectedVoiceChannelId={selectedVoiceChannelId}
           connectedVoiceChannelId={connectedVoiceChannelId}
+          voiceTabMode={voiceTabMode}
           selfMuted={selfMuted}
           selfDeafened={selfDeafened}
           canManageChannels={props.currentUser.role === "Admin"}
@@ -2355,6 +2434,11 @@ function WorkspaceShell(props: {
             setSelectedVoiceChannelId(channelId);
           }}
           onConnectVoiceChannel={(channelId) => {
+            if (voiceTabMode === "secondary") {
+              setInfoMessage("Voice session is active in another tab. Use takeover to move it here.");
+              return;
+            }
+
             if (connectedVoiceChannelId === channelId) {
               setCenterMode("voice");
               return;
@@ -2395,11 +2479,14 @@ function WorkspaceShell(props: {
               setError(reason instanceof Error ? reason.message : "Disconnect failed");
             });
           }}
+          onTakeOverVoice={() => {
+            setTakeoverDialogOpen(true);
+          }}
           onPickAvatar={openAvatarPicker}
           onLogout={props.onLogout}
           onParticipantContextMenu={openParticipantContextMenu}
           sharing={voiceControlState.sharing}
-          shareEnabled={voiceControlState.connected}
+          shareEnabled={voiceControlState.connected && voiceTabMode === "active"}
         />
 
         <Paper sx={{ p: 1.1, minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -2629,6 +2716,29 @@ function WorkspaceShell(props: {
           </Box>
         </Box>
       </Popover>
+
+      <Dialog open={takeoverDialogOpen} onClose={() => setTakeoverDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Take over voice session?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            This tab will become the active voice tab. Voice controls in the currently active tab will stop working.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setTakeoverDialogOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              setTakeoverDialogOpen(false);
+              void takeOverVoiceSession().catch((reason) => {
+                setError(reason instanceof Error ? reason.message : "Takeover failed");
+              });
+            }}
+          >
+            Take over
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog
         open={createChannelType !== null}

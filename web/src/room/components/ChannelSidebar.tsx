@@ -3,6 +3,7 @@ import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import GraphicEqRoundedIcon from "@mui/icons-material/GraphicEqRounded";
 import HeadsetOffIcon from "@mui/icons-material/HeadsetOff";
 import HeadsetIcon from "@mui/icons-material/Headset";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import LogoutIcon from "@mui/icons-material/Logout";
 import MicIcon from "@mui/icons-material/Mic";
 import MicOffIcon from "@mui/icons-material/MicOff";
@@ -17,6 +18,7 @@ import {
   Avatar,
   Badge,
   Box,
+  Button,
   Divider,
   IconButton,
   List,
@@ -45,6 +47,7 @@ export function ChannelSidebar(props: {
   selectedTextChannelId: string | null;
   selectedVoiceChannelId: string | null;
   connectedVoiceChannelId: string | null;
+  voiceTabMode: "idle" | "active" | "secondary";
   selfMuted: boolean;
   selfDeafened: boolean;
   canManageChannels: boolean;
@@ -59,6 +62,7 @@ export function ChannelSidebar(props: {
   onToggleShare: () => void;
   onOpenVoiceSettings: () => void;
   onDisconnectVoice: () => void;
+  onTakeOverVoice: () => void;
   onPickAvatar: () => void;
   onLogout: () => void;
   onParticipantContextMenu: (
@@ -151,6 +155,7 @@ export function ChannelSidebar(props: {
             const isOutlined = isConnected;
             const participants = membersByVoiceChannel[channel.id] ?? [];
             const maxParticipantsLabel = channel.maxParticipants ?? "∞";
+            const isSecondaryConnected = isConnected && props.voiceTabMode === "secondary";
 
             return (
               <Box
@@ -188,7 +193,13 @@ export function ChannelSidebar(props: {
                   </ListItemIcon>
                   <ListItemText
                     primary={channel.name}
-                    secondary={isConnected ? "Connected" : undefined}
+                    secondary={
+                      isSecondaryConnected
+                        ? "Connected in another tab"
+                        : isConnected
+                          ? "Connected"
+                          : undefined
+                    }
                     primaryTypographyProps={{ fontSize: "0.89rem", fontWeight: 600 }}
                     secondaryTypographyProps={{ fontSize: "0.72rem" }}
                   />
@@ -369,7 +380,7 @@ export function ChannelSidebar(props: {
 
       <Divider sx={{ my: 1 }} />
 
-      {props.connectedVoiceChannelId && (
+      {props.connectedVoiceChannelId && props.voiceTabMode === "active" && (
         <Box
           sx={{
             px: 0.8,
@@ -452,6 +463,32 @@ export function ChannelSidebar(props: {
               </IconButton>
             </Tooltip>
           </Stack>
+        </Box>
+      )}
+
+      {props.connectedVoiceChannelId && props.voiceTabMode === "secondary" && (
+        <Box
+          sx={{
+            px: 0.8,
+            py: 0.9,
+            borderRadius: 1.2,
+            bgcolor: alpha("#a2a9b5", 0.12),
+            border: "1px solid rgba(162, 169, 181, 0.35)",
+            mb: 0.8,
+          }}
+        >
+          <Stack direction="row" spacing={0.7} alignItems="center" sx={{ mb: 0.65 }}>
+            <LockOutlinedIcon sx={{ color: "text.secondary", fontSize: 16 }} />
+            <Typography variant="caption" sx={{ fontWeight: 700 }}>
+              Voice is active in another tab
+            </Typography>
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.9 }}>
+            Use takeover to move this voice session here.
+          </Typography>
+          <Button size="small" variant="contained" onClick={props.onTakeOverVoice}>
+            Take over
+          </Button>
         </Box>
       )}
 

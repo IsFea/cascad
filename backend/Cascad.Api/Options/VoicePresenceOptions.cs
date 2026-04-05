@@ -12,5 +12,5 @@ public sealed class VoicePresenceOptions
 
     public int SignalRKeepAliveSeconds { get; set; } = 5;
 
-    public int SignalRClientTimeoutSeconds { get; set; } = 12;
+    public int SignalRClientTimeoutSeconds { get; set; } = 30;
 }

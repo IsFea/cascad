@@ -82,6 +82,8 @@ const EMOJI_SET = ["😀", "😂", "😎", "🥳", "❤️", "🔥", "👍", "�
 const EARCON_ATTACK_MS = 10;
 const EARCON_RELEASE_MS = 28;
 const CONNECTING_EARCON_INTERVAL_MS = 1800;
+const SIGNALR_CLIENT_KEEPALIVE_MS = 5000;
+const SIGNALR_SERVER_TIMEOUT_MS = 30000;
 const EARCON_GAIN_BOOST: Record<VoiceEarconType, number> = {
   join: 1.65,
   leave: 1.65,
@@ -831,7 +833,7 @@ function WorkspaceShell(props: {
     [props.currentUser.id],
   );
 
-  const loadWorkspace = async () => {
+  const loadWorkspace = useCallback(async () => {
     const data = await apiCall<WorkspaceBootstrapResponse>("/workspace", "GET", undefined, props.token);
     setWorkspaceData(data);
 
@@ -862,7 +864,7 @@ function WorkspaceShell(props: {
     setSelfDeafened(me?.isDeafened ?? false);
     setSelfServerMuted(me?.isServerMuted ?? false);
     setSelfServerDeafened(me?.isServerDeafened ?? false);
-  };
+  }, [props.currentUser.id, props.token]);
 
   const loadApprovals = async () => {
     if (props.currentUser.role !== "Admin") {
@@ -917,11 +919,12 @@ function WorkspaceShell(props: {
 
   const applyActiveVoiceRoster = useCallback(
     (participants: Array<{ userId: string; username: string }>) => {
-      const activeVoiceChannelId = connectedVoiceChannelIdRef.current;
+      const activeVoiceChannelId = voiceSessionRef.current?.room.id ?? null;
       const activeWorkspaceId = workspaceIdRef.current;
       if (!activeVoiceChannelId || !activeWorkspaceId) {
         return;
       }
+      const hasPendingVoiceSwitch = connectedVoiceChannelIdRef.current !== activeVoiceChannelId;
 
       const participantById = new Map<string, string>();
       for (const participant of participants) {
@@ -953,6 +956,10 @@ function WorkspaceShell(props: {
         let changed = false;
 
         const nextMembers = current.members.map((member) => {
+          if (member.userId === props.currentUser.id && hasPendingVoiceSwitch) {
+            return member;
+          }
+
           const nextUsername = participantById.get(member.userId);
           if (nextUsername) {
             if (
@@ -1229,6 +1236,8 @@ function WorkspaceShell(props: {
       .withAutomaticReconnect()
       .configureLogging(LogLevel.Error)
       .build();
+    hub.keepAliveIntervalInMilliseconds = SIGNALR_CLIENT_KEEPALIVE_MS;
+    hub.serverTimeoutInMilliseconds = SIGNALR_SERVER_TIMEOUT_MS;
 
     hubRef.current = hub;
     joinedWorkspaceIdRef.current = null;
@@ -1381,7 +1390,8 @@ function WorkspaceShell(props: {
   }, [connectedVoiceChannelId, selectedTextChannelId, syncHubGroups, workspaceId]);
 
   useEffect(() => {
-    if (!connectedVoiceChannelId || !voiceSession?.sessionInstanceId) {
+    const heartbeatChannelId = voiceSession?.room.id ?? null;
+    if (!heartbeatChannelId || !voiceSession?.sessionInstanceId) {
       return;
     }
 
@@ -1404,7 +1414,7 @@ function WorkspaceShell(props: {
           "/voice/heartbeat",
           "POST",
           {
-            channelId: connectedVoiceChannelId,
+            channelId: heartbeatChannelId,
             sessionInstanceId: voiceSession.sessionInstanceId,
           },
           props.token,
@@ -1439,15 +1449,16 @@ function WorkspaceShell(props: {
         window.clearInterval(intervalId);
       }
     };
-  }, [connectedVoiceChannelId, loadWorkspace, props.token, voiceSession?.sessionInstanceId]);
+  }, [loadWorkspace, props.token, voiceSession?.room.id, voiceSession?.sessionInstanceId]);
 
   useEffect(() => {
-    if (!connectedVoiceChannelId || !voiceSession?.sessionInstanceId) {
+    const disconnectChannelId = voiceSession?.room.id ?? null;
+    if (!disconnectChannelId || !voiceSession?.sessionInstanceId) {
       return;
     }
 
     const payload = JSON.stringify({
-      channelId: connectedVoiceChannelId,
+      channelId: disconnectChannelId,
       sessionInstanceId: voiceSession.sessionInstanceId,
     });
 
@@ -1494,7 +1505,7 @@ function WorkspaceShell(props: {
       window.removeEventListener("pagehide", releaseOnPageHide);
       window.removeEventListener("beforeunload", releaseOnPageHide);
     };
-  }, [connectedVoiceChannelId, props.token, voiceSession?.sessionInstanceId]);
+  }, [props.token, voiceSession?.room.id, voiceSession?.sessionInstanceId]);
 
   const sendTextMessage = async (event: FormEvent) => {
     event.preventDefault();
@@ -1664,12 +1675,13 @@ function WorkspaceShell(props: {
   };
 
   const disconnectVoice = async () => {
-    const previousConnectedVoiceChannelId = connectedVoiceChannelIdRef.current;
+    const previousVoiceSession = voiceSessionRef.current;
+    const previousConnectedVoiceChannelId =
+      previousVoiceSession?.room.id ?? connectedVoiceChannelIdRef.current;
     if (!previousConnectedVoiceChannelId) {
       return;
     }
 
-    const previousVoiceSession = voiceSessionRef.current;
     const previousSelfState = {
       isMuted: selfMuted,
       isDeafened: selfDeafened,
@@ -1741,7 +1753,8 @@ function WorkspaceShell(props: {
   };
 
   const applySelfState = async (nextMuted: boolean, nextDeafened: boolean) => {
-    if (!connectedVoiceChannelId) {
+    const selfStateChannelId = voiceSession?.room.id ?? connectedVoiceChannelId;
+    if (!selfStateChannelId) {
       return;
     }
 
@@ -1750,7 +1763,7 @@ function WorkspaceShell(props: {
         "/voice/self-state",
         "POST",
         {
-          channelId: connectedVoiceChannelId,
+          channelId: selfStateChannelId,
           sessionInstanceId: voiceSession?.sessionInstanceId ?? "",
           isMuted: nextMuted,
           isDeafened: nextDeafened,

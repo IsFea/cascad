@@ -43,8 +43,8 @@ var voicePresenceOptions = builder.Configuration
     .Get<VoicePresenceOptions>() ?? new VoicePresenceOptions();
 var signalRKeepAliveSeconds = Math.Max(1, voicePresenceOptions.SignalRKeepAliveSeconds);
 var signalRClientTimeoutSeconds = Math.Max(
-    Math.Max(2, voicePresenceOptions.SignalRClientTimeoutSeconds),
-    signalRKeepAliveSeconds * 2);
+    Math.Max(15, voicePresenceOptions.SignalRClientTimeoutSeconds),
+    signalRKeepAliveSeconds * 3);
 
 builder.Services
     .AddControllers()

@@ -161,6 +161,27 @@ export function shouldApplyVoicePresenceEventForSource(
   );
 }
 
+export function shouldForceLocalVoiceDisconnectFromPresence(
+  event: VoicePresenceChangedEvent,
+  currentUserId: string,
+  connectedVoiceChannelId: string | null,
+  hasVoiceConnectRequestInFlight: boolean,
+): boolean {
+  if (
+    event.userId !== currentUserId ||
+    !connectedVoiceChannelId ||
+    hasVoiceConnectRequestInFlight
+  ) {
+    return false;
+  }
+
+  return (
+    isVoicePresenceChannelTransition(event) &&
+    event.previousVoiceChannelId === connectedVoiceChannelId &&
+    event.currentVoiceChannelId === null
+  );
+}
+
 export function resolveVoiceStatusIndicator(
   member: Pick<
     WorkspaceMemberDto,

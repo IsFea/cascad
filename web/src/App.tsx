@@ -65,12 +65,12 @@ import {
   createOptimisticSelfVoiceStateUpdate,
   isVoiceEarconCooldownPassed,
   shouldApplyVoicePresenceEventForSource,
-  isVoicePresenceChannelTransition,
   normalizeVoicePresenceChangedEvent,
   patchWorkspaceMembersVoiceState,
   resolveLocalConnectEarconType,
   resolveVoiceEarconType,
   shouldApplyVoicePresenceByTimestamp,
+  shouldForceLocalVoiceDisconnectFromPresence,
   shouldPlayLocalDisconnectEarcon,
   shouldStartConnectingEarconLoop,
   VoiceEarconType,
@@ -902,11 +902,19 @@ function WorkspaceShell(props: {
     );
 
     setConnectedVoiceChannelId((current) => {
+      if (voiceConnectRequestInFlightRef.current) {
+        return current;
+      }
+
       if (suppressWorkspaceVoiceSyncRef.current && !voiceSessionRef.current) {
         return current;
       }
 
-      if (current && voiceSessionRef.current?.room.id === current) {
+      if (
+        current &&
+        voiceSessionRef.current?.room.id === current &&
+        data.connectedVoiceChannelId === current
+      ) {
         return current;
       }
 
@@ -1396,15 +1404,27 @@ function WorkspaceShell(props: {
       }
 
       if (
-        event.userId === currentUserIdRef.current &&
-        isVoicePresenceChannelTransition(event) &&
-        connectedVoiceChannelIdRef.current &&
-        event.previousVoiceChannelId === connectedVoiceChannelIdRef.current &&
-        event.currentVoiceChannelId === null
+        shouldForceLocalVoiceDisconnectFromPresence(
+          event,
+          currentUserIdRef.current,
+          connectedVoiceChannelIdRef.current,
+          voiceConnectRequestInFlightRef.current,
+        )
       ) {
-        // Presence events can arrive out-of-order during reconnect races.
-        // Let heartbeat/workspace sync decide whether local voice state is truly gone.
+        voiceConnectionIntentSeqRef.current += 1;
+        voiceConnectRequestInFlightRef.current = false;
+        clearVoiceClientState("You were disconnected from this voice channel.", {
+          suppressWorkspaceVoiceSync: true,
+        });
+        patchSelfWorkspaceVoiceState({
+          connectedVoiceChannelId: null,
+          isMuted: false,
+          isDeafened: false,
+          isServerMuted: false,
+          isServerDeafened: false,
+        });
         void loadWorkspace().catch(() => undefined);
+        return;
       }
 
       const earconType = resolveVoiceEarconType(

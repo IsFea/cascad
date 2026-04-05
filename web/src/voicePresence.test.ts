@@ -14,6 +14,7 @@ import {
   resolveVoiceEarconType,
   shouldApplyVoicePresenceByTimestamp,
   shouldApplyVoicePresenceEventForSource,
+  shouldForceLocalVoiceDisconnectFromPresence,
   shouldPlayLocalDisconnectEarcon,
   shouldStartConnectingEarconLoop,
   VOICE_DISCONNECT_EARCON_DEDUPE_MS,
@@ -299,6 +300,66 @@ describe("voicePresence:event source filtering", () => {
     expect(shouldApplyVoicePresenceEventForSource(stateOnly, "workspace", "v-2")).toBe(false);
     expect(shouldApplyVoicePresenceEventForSource(stateOnly, "workspace", "v-1")).toBe(true);
     expect(shouldApplyVoicePresenceEventForSource(stateOnly, "voiceChannel", null)).toBe(true);
+  });
+});
+
+describe("voicePresence:self disconnect decision", () => {
+  it("forces local disconnect when current user is kicked from currently connected channel", () => {
+    expect(
+      shouldForceLocalVoiceDisconnectFromPresence(
+        makeEvent({
+          userId: "u-1",
+          previousVoiceChannelId: "v-1",
+          currentVoiceChannelId: null,
+        }),
+        "u-1",
+        "v-1",
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not force local disconnect during active connect/disconnect request", () => {
+    expect(
+      shouldForceLocalVoiceDisconnectFromPresence(
+        makeEvent({
+          userId: "u-1",
+          previousVoiceChannelId: "v-1",
+          currentVoiceChannelId: null,
+        }),
+        "u-1",
+        "v-1",
+        true,
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores events for other users or other channels", () => {
+    expect(
+      shouldForceLocalVoiceDisconnectFromPresence(
+        makeEvent({
+          userId: "u-2",
+          previousVoiceChannelId: "v-1",
+          currentVoiceChannelId: null,
+        }),
+        "u-1",
+        "v-1",
+        false,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldForceLocalVoiceDisconnectFromPresence(
+        makeEvent({
+          userId: "u-1",
+          previousVoiceChannelId: "v-2",
+          currentVoiceChannelId: null,
+        }),
+        "u-1",
+        "v-1",
+        false,
+      ),
+    ).toBe(false);
   });
 });
 

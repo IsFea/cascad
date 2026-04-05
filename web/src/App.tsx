@@ -84,6 +84,7 @@ const EARCON_RELEASE_MS = 28;
 const CONNECTING_EARCON_INTERVAL_MS = 1800;
 const SIGNALR_CLIENT_KEEPALIVE_MS = 5000;
 const SIGNALR_SERVER_TIMEOUT_MS = 30000;
+const SIGNALR_LOG_LEVEL = LogLevel.None;
 const EARCON_GAIN_BOOST: Record<VoiceEarconType, number> = {
   join: 1.65,
   leave: 1.65,
@@ -1234,7 +1235,7 @@ function WorkspaceShell(props: {
         accessTokenFactory: () => props.token,
       })
       .withAutomaticReconnect()
-      .configureLogging(LogLevel.Error)
+      .configureLogging(SIGNALR_LOG_LEVEL)
       .build();
     hub.keepAliveIntervalInMilliseconds = SIGNALR_CLIENT_KEEPALIVE_MS;
     hub.serverTimeoutInMilliseconds = SIGNALR_SERVER_TIMEOUT_MS;

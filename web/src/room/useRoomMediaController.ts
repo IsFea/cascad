@@ -1297,6 +1297,12 @@ export function useRoomMediaController(
       setSharing(true);
       return true;
     } catch (reason) {
+      if (isEngineNotConnectedTimeoutError(reason)) {
+        setError("Voice engine is reconnecting. Retry screen share in a moment.");
+        setSharing(false);
+        return false;
+      }
+
       const message =
         reason instanceof Error ? reason.message : "Failed to start screen share.";
       setError(message);

@@ -151,6 +151,11 @@ $PUBLIC_DOMAIN {
     reverse_proxy api:8080
   }
 
+  @hubs path /hubs/*
+  handle @hubs {
+    reverse_proxy api:8080
+  }
+
   @uploads path /uploads/*
   handle @uploads {
     reverse_proxy api:8080
@@ -166,6 +171,11 @@ $PUBLIC_DOMAIN {
   }
 }
 EOF
+
+if ! grep -q "@hubs path /hubs/\\*" "$TMP_CADDY"; then
+  echo "Generated Caddyfile is missing /hubs route." >&2
+  exit 1
+fi
 
 SSH_TARGET="$SSH_USER@$SSH_HOST"
 SSH_BASE=(ssh -p "$SSH_PORT" "$SSH_TARGET")

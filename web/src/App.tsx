@@ -89,6 +89,7 @@ const CONNECTING_EARCON_INTERVAL_MS = 1800;
 const SIGNALR_CLIENT_KEEPALIVE_MS = 5000;
 const SIGNALR_SERVER_TIMEOUT_MS = 30000;
 const SIGNALR_LOG_LEVEL = LogLevel.None;
+const EARCON_VOLUME_MULTIPLIER = 8.4;
 const EARCON_GAIN_BOOST: Record<VoiceEarconType, number> = {
   join: 1.65,
   leave: 1.65,
@@ -327,7 +328,10 @@ async function playVoiceEarcon(context: AudioContext, type: VoiceEarconType) {
   const gapSec = profile.gapMs / 1000;
 
   const masterGain = context.createGain();
-  masterGain.gain.setValueAtTime(profile.gain * EARCON_GAIN_BOOST[type], baseTime);
+  masterGain.gain.setValueAtTime(
+    profile.gain * EARCON_GAIN_BOOST[type] * EARCON_VOLUME_MULTIPLIER,
+    baseTime,
+  );
   masterGain.connect(context.destination);
 
   profile.frequencies.forEach((frequency, index) => {

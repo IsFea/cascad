@@ -151,6 +151,11 @@ $PUBLIC_DOMAIN {
     reverse_proxy api:8080
   }
 
+  @uploads path /uploads/*
+  handle @uploads {
+    reverse_proxy api:8080
+  }
+
   @rtc path /rtc*
   handle @rtc {
     reverse_proxy livekit:7880

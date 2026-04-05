@@ -20,6 +20,7 @@ builder.Services.Configure<ClientOptions>(builder.Configuration.GetSection(Clien
 builder.Services.Configure<SeedOptions>(builder.Configuration.GetSection(SeedOptions.SectionName));
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection(StorageOptions.SectionName));
+builder.Services.Configure<VoicePresenceOptions>(builder.Configuration.GetSection(VoicePresenceOptions.SectionName));
 
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
@@ -34,6 +35,16 @@ builder.Services.AddScoped<ILiveKitTokenService, LiveKitTokenService>();
 builder.Services.AddScoped<IDatabaseSeeder, DatabaseSeeder>();
 builder.Services.AddScoped<IDatabaseSchemaUpgrader, DatabaseSchemaUpgrader>();
 builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
+builder.Services.AddScoped<IVoicePresenceMaintenanceService, VoicePresenceMaintenanceService>();
+builder.Services.AddHostedService<VoicePresenceCleanupHostedService>();
+
+var voicePresenceOptions = builder.Configuration
+    .GetSection(VoicePresenceOptions.SectionName)
+    .Get<VoicePresenceOptions>() ?? new VoicePresenceOptions();
+var signalRKeepAliveSeconds = Math.Max(1, voicePresenceOptions.SignalRKeepAliveSeconds);
+var signalRClientTimeoutSeconds = Math.Max(
+    Math.Max(2, voicePresenceOptions.SignalRClientTimeoutSeconds),
+    signalRKeepAliveSeconds * 2);
 
 builder.Services
     .AddControllers()
@@ -41,7 +52,11 @@ builder.Services
     {
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    options.KeepAliveInterval = TimeSpan.FromSeconds(signalRKeepAliveSeconds);
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(signalRClientTimeoutSeconds);
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -102,7 +117,9 @@ builder.Services
                 // SignalR WebSocket/SSE transports send JWT in access_token query param.
                 var accessToken = context.Request.Query["access_token"];
                 var path = context.HttpContext.Request.Path;
-                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs/chat"))
+                if (!string.IsNullOrEmpty(accessToken) &&
+                    (path.StartsWithSegments("/hubs/chat") ||
+                     path.StartsWithSegments("/api/voice/disconnect")))
                 {
                     context.Token = accessToken;
                 }

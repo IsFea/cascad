@@ -11,6 +11,9 @@ using Cascad.Api.Contracts.Admin;
 using Cascad.Api.Contracts.Auth;
 using Cascad.Api.Contracts.Voice;
 using Cascad.Api.Contracts.Workspace;
+using Cascad.Api.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Cascad.Api.Tests;
 
@@ -204,6 +207,281 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
             Assert.Equal(workspaceId, disconnectEvent.WorkspaceId);
             Assert.Equal(voiceChannelId, disconnectEvent.PreviousVoiceChannelId);
             Assert.Null(disconnectEvent.CurrentVoiceChannelId);
+        }
+        finally
+        {
+            await hubConnection.StopAsync();
+            await hubConnection.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task VoiceChannelPresenceChanged_ShouldBeDeliveredToVoiceChannelSubscribers_OnConnectAndDisconnect()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        await RegisterAndApproveAsync(adminClient, "channelalice");
+        await RegisterAndApproveAsync(adminClient, "channelbob");
+
+        var aliceClient = _factory.CreateClient();
+        var aliceToken = await LoginAsync(aliceClient, "channelalice", "channelalice12345");
+        aliceClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", aliceToken);
+
+        var bobClient = _factory.CreateClient();
+        var bobToken = await LoginAsync(bobClient, "channelbob", "channelbob12345");
+        bobClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bobToken);
+        var bobWorkspace = await bobClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(bobWorkspace);
+
+        var aliceWorkspace = await aliceClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(aliceWorkspace);
+        var voiceChannelId = aliceWorkspace!.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+        var aliceUserId = aliceWorkspace.CurrentUser.Id;
+
+        var eventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var hubConnection = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(bobToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+
+        hubConnection.On<VoicePresenceChangedEventDto>(
+            "voiceChannelPresenceChanged",
+            payload => eventChannel.Writer.TryWrite(payload));
+
+        await hubConnection.StartAsync();
+        try
+        {
+            await hubConnection.InvokeAsync("JoinVoiceChannel", voiceChannelId);
+
+            var connectResponse = await aliceClient.PostAsJsonAsync(
+                "/api/voice/connect",
+                new VoiceConnectRequest { ChannelId = voiceChannelId });
+            connectResponse.EnsureSuccessStatusCode();
+
+            var connectEvent = await WaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x => x.UserId == aliceUserId && x.CurrentVoiceChannelId == voiceChannelId);
+            Assert.Equal(voiceChannelId, connectEvent.CurrentVoiceChannelId);
+
+            var disconnectResponse = await aliceClient.PostAsJsonAsync(
+                "/api/voice/disconnect",
+                new VoiceDisconnectRequest { ChannelId = voiceChannelId });
+            disconnectResponse.EnsureSuccessStatusCode();
+
+            var disconnectEvent = await WaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x => x.UserId == aliceUserId &&
+                     x.PreviousVoiceChannelId == voiceChannelId &&
+                     x.CurrentVoiceChannelId is null);
+            Assert.Equal(voiceChannelId, disconnectEvent.PreviousVoiceChannelId);
+            Assert.Null(disconnectEvent.CurrentVoiceChannelId);
+        }
+        finally
+        {
+            await hubConnection.StopAsync();
+            await hubConnection.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task VoiceChannelPresenceChanged_ShouldBeDeliveredToPreviousAndCurrentChannels_OnSwitch()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        await RegisterAndApproveAsync(adminClient, "switchmover");
+        await RegisterAndApproveAsync(adminClient, "switchwatchera");
+        await RegisterAndApproveAsync(adminClient, "switchwatcherb");
+
+        var createVoice = await adminClient.PostAsJsonAsync(
+            "/api/workspace/channels",
+            new CreateChannelRequest
+            {
+                Name = "switch-target",
+                Type = Cascad.Api.Data.Entities.ChannelType.Voice,
+                MaxParticipants = 12,
+                MaxConcurrentStreams = 4
+            });
+        createVoice.EnsureSuccessStatusCode();
+        var secondVoice = await createVoice.Content.ReadFromJsonAsync<ChannelDto>(JsonOptions);
+        Assert.NotNull(secondVoice);
+
+        var moverClient = _factory.CreateClient();
+        var moverToken = await LoginAsync(moverClient, "switchmover", "switchmover12345");
+        moverClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", moverToken);
+        var moverWorkspace = await moverClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(moverWorkspace);
+        var firstVoiceChannelId = moverWorkspace!.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+        var secondVoiceChannelId = secondVoice!.Id;
+        var moverUserId = moverWorkspace.CurrentUser.Id;
+
+        var watcherAToken = await LoginAsync(_factory.CreateClient(), "switchwatchera", "switchwatchera12345");
+        var watcherBToken = await LoginAsync(_factory.CreateClient(), "switchwatcherb", "switchwatcherb12345");
+
+        var eventsA = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var eventsB = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+
+        var hubA = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(watcherAToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+        hubA.On<VoicePresenceChangedEventDto>(
+            "voiceChannelPresenceChanged",
+            payload => eventsA.Writer.TryWrite(payload));
+
+        var hubB = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(watcherBToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+        hubB.On<VoicePresenceChangedEventDto>(
+            "voiceChannelPresenceChanged",
+            payload => eventsB.Writer.TryWrite(payload));
+
+        await hubA.StartAsync();
+        await hubB.StartAsync();
+        try
+        {
+            await hubA.InvokeAsync("JoinVoiceChannel", firstVoiceChannelId);
+            await hubB.InvokeAsync("JoinVoiceChannel", secondVoiceChannelId);
+
+            var connectFirst = await moverClient.PostAsJsonAsync(
+                "/api/voice/connect",
+                new VoiceConnectRequest { ChannelId = firstVoiceChannelId });
+            connectFirst.EnsureSuccessStatusCode();
+
+            var switchResponse = await moverClient.PostAsJsonAsync(
+                "/api/voice/connect",
+                new VoiceConnectRequest { ChannelId = secondVoiceChannelId });
+            switchResponse.EnsureSuccessStatusCode();
+
+            var leftFirstChannelEvent = await WaitForVoicePresenceAsync(
+                eventsA.Reader,
+                x => x.UserId == moverUserId &&
+                     x.PreviousVoiceChannelId == firstVoiceChannelId &&
+                     x.CurrentVoiceChannelId == secondVoiceChannelId);
+            Assert.Equal(firstVoiceChannelId, leftFirstChannelEvent.PreviousVoiceChannelId);
+            Assert.Equal(secondVoiceChannelId, leftFirstChannelEvent.CurrentVoiceChannelId);
+
+            var joinedSecondChannelEvent = await WaitForVoicePresenceAsync(
+                eventsB.Reader,
+                x => x.UserId == moverUserId &&
+                     x.PreviousVoiceChannelId == firstVoiceChannelId &&
+                     x.CurrentVoiceChannelId == secondVoiceChannelId);
+            Assert.Equal(firstVoiceChannelId, joinedSecondChannelEvent.PreviousVoiceChannelId);
+            Assert.Equal(secondVoiceChannelId, joinedSecondChannelEvent.CurrentVoiceChannelId);
+        }
+        finally
+        {
+            await hubA.StopAsync();
+            await hubA.DisposeAsync();
+            await hubB.StopAsync();
+            await hubB.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task StaleVoicePresence_ShouldBeBroadcastByBackgroundCleanupLoop_WithoutVoiceEndpointCall()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        await RegisterAndApproveAsync(adminClient, "stalecleanalice");
+        await RegisterAndApproveAsync(adminClient, "stalecleanbob");
+
+        var aliceClient = _factory.CreateClient();
+        var aliceToken = await LoginAsync(aliceClient, "stalecleanalice", "stalecleanalice12345");
+        aliceClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", aliceToken);
+
+        var bobClient = _factory.CreateClient();
+        var bobToken = await LoginAsync(bobClient, "stalecleanbob", "stalecleanbob12345");
+        bobClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bobToken);
+        var bobWorkspace = await bobClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(bobWorkspace);
+
+        var aliceWorkspace = await aliceClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(aliceWorkspace);
+        var workspaceId = aliceWorkspace!.Workspace.Id;
+        var voiceChannelId = aliceWorkspace.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+        var aliceUserId = aliceWorkspace.CurrentUser.Id;
+
+        var workspaceEventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var voiceChannelEventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var hubConnection = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(bobToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+
+        hubConnection.On<VoicePresenceChangedEventDto>(
+            "voicePresenceChanged",
+            payload => workspaceEventChannel.Writer.TryWrite(payload));
+        hubConnection.On<VoicePresenceChangedEventDto>(
+            "voiceChannelPresenceChanged",
+            payload => voiceChannelEventChannel.Writer.TryWrite(payload));
+
+        await hubConnection.StartAsync();
+        try
+        {
+            await hubConnection.InvokeAsync("JoinWorkspace", workspaceId);
+            await hubConnection.InvokeAsync("JoinVoiceChannel", voiceChannelId);
+
+            var connectResponse = await aliceClient.PostAsJsonAsync(
+                "/api/voice/connect",
+                new VoiceConnectRequest { ChannelId = voiceChannelId });
+            connectResponse.EnsureSuccessStatusCode();
+
+            _ = await WaitForVoicePresenceAsync(
+                workspaceEventChannel.Reader,
+                x => x.UserId == aliceUserId && x.CurrentVoiceChannelId == voiceChannelId);
+
+            using var scope = _factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var staleSession = await db.VoiceSessions.SingleAsync(
+                x => x.ChannelId == voiceChannelId && x.UserId == aliceUserId);
+            staleSession.LastSeenAtUtc = DateTime.UtcNow.AddMinutes(-1);
+            await db.SaveChangesAsync();
+
+            var staleDisconnectEvent = await WaitForVoicePresenceAsync(
+                workspaceEventChannel.Reader,
+                x => x.UserId == aliceUserId &&
+                     x.PreviousVoiceChannelId == voiceChannelId &&
+                     x.CurrentVoiceChannelId is null);
+            Assert.Equal(workspaceId, staleDisconnectEvent.WorkspaceId);
+
+            var staleChannelDisconnectEvent = await WaitForVoicePresenceAsync(
+                voiceChannelEventChannel.Reader,
+                x => x.UserId == aliceUserId &&
+                     x.PreviousVoiceChannelId == voiceChannelId &&
+                     x.CurrentVoiceChannelId is null);
+            Assert.Equal(voiceChannelId, staleChannelDisconnectEvent.PreviousVoiceChannelId);
+            Assert.Null(staleChannelDisconnectEvent.CurrentVoiceChannelId);
         }
         finally
         {

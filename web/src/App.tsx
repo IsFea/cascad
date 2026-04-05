@@ -60,11 +60,13 @@ import {
   WorkspaceBootstrapResponse,
 } from "./types";
 import {
+  buildVoicePresenceEventSignature,
   isVoiceEarconCooldownPassed,
   normalizeVoicePresenceChangedEvent,
   patchWorkspaceMembersVoiceState,
   resolveLocalConnectEarconType,
   resolveVoiceEarconType,
+  shouldApplyVoicePresenceByTimestamp,
   shouldPlayLocalDisconnectEarcon,
   shouldStartConnectingEarconLoop,
   VoiceEarconType,
@@ -650,6 +652,11 @@ function WorkspaceShell(props: {
   const connectedVoiceChannelIdRef = useRef<string | null>(null);
   const voiceSessionRef = useRef<JoinRoomResponse | null>(null);
   const suppressWorkspaceVoiceSyncRef = useRef(false);
+  const voiceConnectionIntentSeqRef = useRef(0);
+  const voiceConnectRequestInFlightRef = useRef(false);
+  const lastVoicePresenceEventAtByUserRef = useRef<Record<string, number>>({});
+  const lastVoicePresenceSignatureByUserRef = useRef<Record<string, string>>({});
+  const lastActiveVoiceRosterSignatureRef = useRef("");
   const workspaceIdRef = useRef<string | null>(null);
   const currentUserIdRef = useRef(props.currentUser.id);
   const joinedWorkspaceIdRef = useRef<string | null>(null);
@@ -682,6 +689,15 @@ function WorkspaceShell(props: {
   useEffect(() => {
     voiceSessionRef.current = voiceSession;
   }, [voiceSession]);
+
+  useEffect(() => {
+    lastVoicePresenceEventAtByUserRef.current = {};
+    lastVoicePresenceSignatureByUserRef.current = {};
+  }, [workspaceId]);
+
+  useEffect(() => {
+    lastActiveVoiceRosterSignatureRef.current = "";
+  }, [workspaceId, connectedVoiceChannelId]);
 
   useEffect(() => {
     return () => {
@@ -762,6 +778,58 @@ function WorkspaceShell(props: {
     }
     return map;
   }, [workspaceData?.members]);
+
+  const patchSelfWorkspaceVoiceState = useCallback(
+    (next: {
+      connectedVoiceChannelId?: string | null;
+      isMuted?: boolean;
+      isDeafened?: boolean;
+      isServerMuted?: boolean;
+      isServerDeafened?: boolean;
+    }) => {
+      setWorkspaceData((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const index = current.members.findIndex((member) => member.userId === props.currentUser.id);
+        if (index < 0) {
+          return current;
+        }
+
+        const member = current.members[index];
+        const updated: WorkspaceMemberDto = {
+          ...member,
+          connectedVoiceChannelId:
+            next.connectedVoiceChannelId !== undefined
+              ? next.connectedVoiceChannelId
+              : member.connectedVoiceChannelId,
+          isMuted: next.isMuted ?? member.isMuted,
+          isDeafened: next.isDeafened ?? member.isDeafened,
+          isServerMuted: next.isServerMuted ?? member.isServerMuted,
+          isServerDeafened: next.isServerDeafened ?? member.isServerDeafened,
+        };
+
+        if (
+          updated.connectedVoiceChannelId === member.connectedVoiceChannelId &&
+          updated.isMuted === member.isMuted &&
+          updated.isDeafened === member.isDeafened &&
+          updated.isServerMuted === member.isServerMuted &&
+          updated.isServerDeafened === member.isServerDeafened
+        ) {
+          return current;
+        }
+
+        const members = current.members.slice();
+        members[index] = updated;
+        return {
+          ...current,
+          members,
+        };
+      });
+    },
+    [props.currentUser.id],
+  );
 
   const loadWorkspace = async () => {
     const data = await apiCall<WorkspaceBootstrapResponse>("/workspace", "GET", undefined, props.token);
@@ -847,6 +915,111 @@ function WorkspaceShell(props: {
     void playVoiceEarcon(context, type).catch(() => undefined);
   };
 
+  const applyActiveVoiceRoster = useCallback(
+    (participants: Array<{ userId: string; username: string }>) => {
+      const activeVoiceChannelId = connectedVoiceChannelIdRef.current;
+      const activeWorkspaceId = workspaceIdRef.current;
+      if (!activeVoiceChannelId || !activeWorkspaceId) {
+        return;
+      }
+
+      const participantById = new Map<string, string>();
+      for (const participant of participants) {
+        if (!participant.userId) {
+          continue;
+        }
+
+        participantById.set(participant.userId, participant.username?.trim() || participant.userId);
+      }
+
+      const signature = [
+        activeVoiceChannelId,
+        ...Array.from(participantById.entries())
+          .sort((left, right) => left[0].localeCompare(right[0]))
+          .map(([userId, username]) => `${userId}:${username}`),
+      ].join("|");
+
+      if (lastActiveVoiceRosterSignatureRef.current === signature) {
+        return;
+      }
+      lastActiveVoiceRosterSignatureRef.current = signature;
+
+      setWorkspaceData((current) => {
+        if (!current || current.workspace.id !== activeWorkspaceId) {
+          return current;
+        }
+
+        const existingMemberIds = new Set(current.members.map((member) => member.userId));
+        let changed = false;
+
+        const nextMembers = current.members.map((member) => {
+          const nextUsername = participantById.get(member.userId);
+          if (nextUsername) {
+            if (
+              member.connectedVoiceChannelId === activeVoiceChannelId &&
+              member.username === nextUsername
+            ) {
+              return member;
+            }
+
+            changed = true;
+            return {
+              ...member,
+              username: nextUsername,
+              connectedVoiceChannelId: activeVoiceChannelId,
+            };
+          }
+
+          if (
+            member.userId !== props.currentUser.id &&
+            member.connectedVoiceChannelId === activeVoiceChannelId
+          ) {
+            changed = true;
+            return {
+              ...member,
+              connectedVoiceChannelId: null,
+              isMuted: false,
+              isDeafened: false,
+              isServerMuted: false,
+              isServerDeafened: false,
+            };
+          }
+
+          return member;
+        });
+
+        for (const [userId, username] of participantById) {
+          if (existingMemberIds.has(userId)) {
+            continue;
+          }
+
+          changed = true;
+          nextMembers.push({
+            userId,
+            username,
+            role: "User",
+            avatarUrl: null,
+            connectedVoiceChannelId: activeVoiceChannelId,
+            isMuted: false,
+            isDeafened: false,
+            isServerMuted: false,
+            isServerDeafened: false,
+          });
+        }
+
+        if (!changed) {
+          return current;
+        }
+
+        return {
+          ...current,
+          members: nextMembers,
+        };
+      });
+    },
+    [props.currentUser.id],
+  );
+
   const ensureVoiceSession = async (channelId: string) => {
     const connected = await apiCall<VoiceConnectResponse>(
       "/voice/connect",
@@ -854,8 +1027,17 @@ function WorkspaceShell(props: {
       { channelId, tabInstanceId },
       props.token,
     );
+
+    if (connectedVoiceChannelIdRef.current !== channelId) {
+      return;
+    }
+
+    suppressWorkspaceVoiceSyncRef.current = false;
     setConnectedVoiceChannelId(connected.channelId);
     setVoiceSession(mapVoiceToRoomSession(connected, props.currentUser, props.token));
+    patchSelfWorkspaceVoiceState({
+      connectedVoiceChannelId: connected.channelId,
+    });
   };
 
   useEffect(() => {
@@ -914,6 +1096,10 @@ function WorkspaceShell(props: {
       return;
     }
 
+    if (voiceConnectRequestInFlightRef.current) {
+      return;
+    }
+
     if (suppressWorkspaceVoiceSyncRef.current && !voiceSession) {
       return;
     }
@@ -922,7 +1108,24 @@ function WorkspaceShell(props: {
       return;
     }
 
-    void ensureVoiceSession(connectedVoiceChannelId).catch(() => undefined);
+    void ensureVoiceSession(connectedVoiceChannelId).catch((reason) => {
+      if (connectedVoiceChannelIdRef.current !== connectedVoiceChannelId) {
+        return;
+      }
+
+      if (isVoiceSessionReplacedError(reason)) {
+        handleVoiceSessionReplaced();
+        return;
+      }
+
+      if (isVoiceSessionUnavailableError(reason)) {
+        clearVoiceClientState(undefined, { suppressWorkspaceVoiceSync: true });
+        void loadWorkspace().catch(() => undefined);
+        return;
+      }
+
+      setError(reason instanceof Error ? reason.message : "Voice connect failed");
+    });
   }, [connectedVoiceChannelId, voiceSession]);
 
   useEffect(() => {
@@ -1047,7 +1250,7 @@ function WorkspaceShell(props: {
       },
     );
 
-    hub.on("voicePresenceChanged", (rawEvent: unknown) => {
+    const applyVoicePresenceEvent = (rawEvent: unknown) => {
       const event = normalizeVoicePresenceChangedEvent(rawEvent);
       if (!event) {
         return;
@@ -1058,9 +1261,47 @@ function WorkspaceShell(props: {
         return;
       }
 
+      const signature = buildVoicePresenceEventSignature(event);
+      const lastSignature = lastVoicePresenceSignatureByUserRef.current[event.userId];
+      if (lastSignature === signature) {
+        return;
+      }
+
+      const lastOccurredAtMs = lastVoicePresenceEventAtByUserRef.current[event.userId] ?? -Infinity;
+      const presenceOrdering = shouldApplyVoicePresenceByTimestamp(event.occurredAtUtc, lastOccurredAtMs);
+      if (!presenceOrdering.shouldApply) {
+        return;
+      }
+      lastVoicePresenceEventAtByUserRef.current[event.userId] = presenceOrdering.occurredAtMs;
+      lastVoicePresenceSignatureByUserRef.current[event.userId] = signature;
+
       setWorkspaceData((current) => {
         if (!current || current.workspace.id !== event.workspaceId) {
           return current;
+        }
+
+        const memberIndex = current.members.findIndex((member) => member.userId === event.userId);
+        if (memberIndex < 0) {
+          if (!event.currentVoiceChannelId) {
+            return current;
+          }
+
+          const nextMembers = current.members.concat({
+            userId: event.userId,
+            username: event.username,
+            role: "User",
+            avatarUrl: event.avatarUrl,
+            connectedVoiceChannelId: event.currentVoiceChannelId,
+            isMuted: event.isMuted,
+            isDeafened: event.isDeafened,
+            isServerMuted: event.isServerMuted,
+            isServerDeafened: event.isServerDeafened,
+          });
+
+          return {
+            ...current,
+            members: nextMembers,
+          };
         }
 
         const nextMembers = patchWorkspaceMembersVoiceState(current.members, event);
@@ -1102,7 +1343,10 @@ function WorkspaceShell(props: {
       }
 
       tryPlayVoiceEarcon(earconType);
-    });
+    };
+
+    hub.on("voicePresenceChanged", applyVoicePresenceEvent);
+    hub.on("voiceChannelPresenceChanged", applyVoicePresenceEvent);
 
     void hub
       .start()
@@ -1113,6 +1357,7 @@ function WorkspaceShell(props: {
 
     hub.onreconnected(() => {
       void syncHubGroups(hub);
+      void loadWorkspace().catch(() => undefined);
     });
 
     return () => {
@@ -1201,7 +1446,29 @@ function WorkspaceShell(props: {
       return;
     }
 
+    const payload = JSON.stringify({
+      channelId: connectedVoiceChannelId,
+      sessionInstanceId: voiceSession.sessionInstanceId,
+    });
+
     const releaseOnPageHide = () => {
+      let beaconDelivered = false;
+      try {
+        if (typeof navigator.sendBeacon === "function") {
+          const beaconBody = new Blob([payload], { type: "application/json" });
+          beaconDelivered = navigator.sendBeacon(
+            `${API_BASE}/voice/disconnect?access_token=${encodeURIComponent(props.token)}`,
+            beaconBody,
+          );
+        }
+      } catch {
+        beaconDelivered = false;
+      }
+
+      if (beaconDelivered) {
+        return;
+      }
+
       void fetch(`${API_BASE}/voice/disconnect`, {
         method: "POST",
         keepalive: true,
@@ -1209,16 +1476,21 @@ function WorkspaceShell(props: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${props.token}`,
         },
-        body: JSON.stringify({
-          channelId: connectedVoiceChannelId,
-          sessionInstanceId: voiceSession.sessionInstanceId,
-        }),
+        body: payload,
       }).catch(() => undefined);
     };
 
+    const releaseOnHidden = () => {
+      if (document.visibilityState === "hidden") {
+        releaseOnPageHide();
+      }
+    };
+
+    document.addEventListener("visibilitychange", releaseOnHidden);
     window.addEventListener("pagehide", releaseOnPageHide);
     window.addEventListener("beforeunload", releaseOnPageHide);
     return () => {
+      document.removeEventListener("visibilitychange", releaseOnHidden);
       window.removeEventListener("pagehide", releaseOnPageHide);
       window.removeEventListener("beforeunload", releaseOnPageHide);
     };
@@ -1321,50 +1593,151 @@ function WorkspaceShell(props: {
   };
 
   const handleVoiceSessionReplaced = () => {
+    voiceConnectionIntentSeqRef.current += 1;
+    voiceConnectRequestInFlightRef.current = false;
     clearVoiceClientState("Voice session moved to another tab.", {
       suppressWorkspaceVoiceSync: true,
+    });
+    patchSelfWorkspaceVoiceState({
+      connectedVoiceChannelId: null,
+      isMuted: false,
+      isDeafened: false,
+      isServerMuted: false,
+      isServerDeafened: false,
     });
     void loadWorkspace().catch(() => undefined);
   };
 
   const connectVoice = async (channelId: string) => {
+    const previousConnectedVoiceChannelId = connectedVoiceChannelIdRef.current;
+    const previousSelectedVoiceChannelId = selectedVoiceChannelId;
+    const previousVoiceSession = voiceSessionRef.current;
+    const intentSeq = ++voiceConnectionIntentSeqRef.current;
+    voiceConnectRequestInFlightRef.current = true;
     suppressWorkspaceVoiceSyncRef.current = false;
-    const connected = await apiCall<VoiceConnectResponse>(
-      "/voice/connect",
-      "POST",
-      { channelId, tabInstanceId },
-      props.token,
-    );
 
-    setConnectedVoiceChannelId(connected.channelId);
-    setSelectedVoiceChannelId(connected.channelId);
+    setConnectedVoiceChannelId(channelId);
+    setSelectedVoiceChannelId(channelId);
     setCenterMode("voice");
-    setVoiceSession(mapVoiceToRoomSession(connected, props.currentUser, props.token));
-    await loadWorkspace();
+    patchSelfWorkspaceVoiceState({
+      connectedVoiceChannelId: channelId,
+    });
+
+    try {
+      const connected = await apiCall<VoiceConnectResponse>(
+        "/voice/connect",
+        "POST",
+        { channelId, tabInstanceId },
+        props.token,
+      );
+
+      if (intentSeq !== voiceConnectionIntentSeqRef.current) {
+        return;
+      }
+
+      setConnectedVoiceChannelId(connected.channelId);
+      setSelectedVoiceChannelId(connected.channelId);
+      setCenterMode("voice");
+      setVoiceSession(mapVoiceToRoomSession(connected, props.currentUser, props.token));
+      patchSelfWorkspaceVoiceState({
+        connectedVoiceChannelId: connected.channelId,
+      });
+      void loadWorkspace().catch(() => undefined);
+    } catch (reason) {
+      if (intentSeq !== voiceConnectionIntentSeqRef.current) {
+        return;
+      }
+
+      setConnectedVoiceChannelId(previousConnectedVoiceChannelId);
+      setSelectedVoiceChannelId(previousSelectedVoiceChannelId);
+      setVoiceSession(previousVoiceSession);
+      patchSelfWorkspaceVoiceState({
+        connectedVoiceChannelId: previousConnectedVoiceChannelId,
+      });
+
+      throw reason;
+    } finally {
+      if (intentSeq === voiceConnectionIntentSeqRef.current) {
+        voiceConnectRequestInFlightRef.current = false;
+      }
+    }
   };
 
   const disconnectVoice = async () => {
-    if (!connectedVoiceChannelId) {
+    const previousConnectedVoiceChannelId = connectedVoiceChannelIdRef.current;
+    if (!previousConnectedVoiceChannelId) {
       return;
     }
 
-    const sessionInstanceId = voiceSession?.sessionInstanceId ?? "";
+    const previousVoiceSession = voiceSessionRef.current;
+    const previousSelfState = {
+      isMuted: selfMuted,
+      isDeafened: selfDeafened,
+      isServerMuted: selfServerMuted,
+      isServerDeafened: selfServerDeafened,
+    };
+    const sessionInstanceId = previousVoiceSession?.sessionInstanceId ?? "";
+    const intentSeq = ++voiceConnectionIntentSeqRef.current;
+    voiceConnectRequestInFlightRef.current = true;
+    suppressWorkspaceVoiceSyncRef.current = true;
+    setConnectedVoiceChannelId(null);
+    patchSelfWorkspaceVoiceState({
+      connectedVoiceChannelId: null,
+      isMuted: false,
+      isDeafened: false,
+      isServerMuted: false,
+      isServerDeafened: false,
+    });
+
     try {
-      await apiCall<void>(
-        "/voice/disconnect",
-        "POST",
-        { channelId: connectedVoiceChannelId, sessionInstanceId },
-        props.token,
-      );
-    } catch (reason) {
-      if (!isVoiceSessionUnavailableError(reason)) {
-        throw reason;
+      try {
+        await apiCall<void>(
+          "/voice/disconnect",
+          "POST",
+          { channelId: previousConnectedVoiceChannelId, sessionInstanceId },
+          props.token,
+        );
+      } catch (reason) {
+        if (intentSeq !== voiceConnectionIntentSeqRef.current) {
+          return;
+        }
+
+        if (!isVoiceSessionUnavailableError(reason)) {
+          suppressWorkspaceVoiceSyncRef.current = false;
+          setConnectedVoiceChannelId(previousConnectedVoiceChannelId);
+          setSelectedVoiceChannelId(previousConnectedVoiceChannelId);
+          setVoiceSession(previousVoiceSession);
+          setSelfMuted(previousSelfState.isMuted);
+          setSelfDeafened(previousSelfState.isDeafened);
+          setSelfServerMuted(previousSelfState.isServerMuted);
+          setSelfServerDeafened(previousSelfState.isServerDeafened);
+          patchSelfWorkspaceVoiceState({
+            connectedVoiceChannelId: previousConnectedVoiceChannelId,
+            isMuted: previousSelfState.isMuted,
+            isDeafened: previousSelfState.isDeafened,
+            isServerMuted: previousSelfState.isServerMuted,
+            isServerDeafened: previousSelfState.isServerDeafened,
+          });
+          throw reason;
+        }
+      }
+
+      if (intentSeq === voiceConnectionIntentSeqRef.current) {
+        clearVoiceClientState();
+        patchSelfWorkspaceVoiceState({
+          connectedVoiceChannelId: null,
+          isMuted: false,
+          isDeafened: false,
+          isServerMuted: false,
+          isServerDeafened: false,
+        });
+        void loadWorkspace().catch(() => undefined);
+      }
+    } finally {
+      if (intentSeq === voiceConnectionIntentSeqRef.current) {
+        voiceConnectRequestInFlightRef.current = false;
       }
     }
-
-    suppressWorkspaceVoiceSyncRef.current = true;
-    clearVoiceClientState();
-    await loadWorkspace();
   };
 
   const applySelfState = async (nextMuted: boolean, nextDeafened: boolean) => {
@@ -1847,6 +2220,7 @@ function WorkspaceShell(props: {
                 voiceMessages={liveVoiceMessages}
                 onSendVoiceMessage={sendLiveVoiceMessage}
                 onSpeakingUsersChange={setSpeakingUserIds}
+                onActiveParticipantsChange={applyActiveVoiceRoster}
                 onControlsChange={handleVoiceControlsChange}
                 isInActiveVoiceChannel={connectedVoiceChannelId === voiceSession.room.id}
                 canModerate={props.currentUser.role === "Admin"}

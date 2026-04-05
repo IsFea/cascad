@@ -99,6 +99,35 @@ export function isVoiceEarconCooldownPassed(
   return nowMs - lastPlayedAtMs >= cooldownMs;
 }
 
+export function resolveVoicePresenceOccurredAtMs(
+  occurredAtUtc: string,
+  fallbackNowMs = Date.now(),
+): number {
+  const parsedOccurredAtMs = Date.parse(occurredAtUtc);
+  return Number.isFinite(parsedOccurredAtMs) ? parsedOccurredAtMs : fallbackNowMs;
+}
+
+export function shouldApplyVoicePresenceByTimestamp(
+  occurredAtUtc: string,
+  lastOccurredAtMs: number,
+  fallbackNowMs = Date.now(),
+): { shouldApply: boolean; occurredAtMs: number } {
+  const occurredAtMs = resolveVoicePresenceOccurredAtMs(occurredAtUtc, fallbackNowMs);
+  return {
+    shouldApply: occurredAtMs >= lastOccurredAtMs,
+    occurredAtMs,
+  };
+}
+
+export function buildVoicePresenceEventSignature(event: VoicePresenceChangedEvent): string {
+  return [
+    event.userId,
+    event.previousVoiceChannelId ?? "",
+    event.currentVoiceChannelId ?? "",
+    event.occurredAtUtc,
+  ].join("|");
+}
+
 function readStringField(input: Record<string, unknown>, camel: string, pascal: string): string | null {
   const value = input[camel] ?? input[pascal];
   return typeof value === "string" && value.length > 0 ? value : null;

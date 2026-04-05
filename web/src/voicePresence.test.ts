@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { VoicePresenceChangedEvent, WorkspaceMemberDto } from "./types";
 import {
+  buildVoicePresenceEventSignature,
   isVoiceEarconCooldownPassed,
   normalizeVoicePresenceChangedEvent,
   patchWorkspaceMembersVoiceState,
+  resolveVoicePresenceOccurredAtMs,
   resolveLocalConnectEarconType,
   resolveVoiceEarconType,
+  shouldApplyVoicePresenceByTimestamp,
   shouldPlayLocalDisconnectEarcon,
   shouldStartConnectingEarconLoop,
   VOICE_DISCONNECT_EARCON_DEDUPE_MS,
@@ -224,5 +227,47 @@ describe("voicePresence:normalizeVoicePresenceChangedEvent", () => {
 
     expect(normalized?.isServerMuted).toBe(false);
     expect(normalized?.isServerDeafened).toBe(false);
+  });
+});
+
+describe("voicePresence:timestamp ordering", () => {
+  it("parses valid occurredAtUtc", () => {
+    const occurredAtMs = resolveVoicePresenceOccurredAtMs("2026-04-04T10:00:00.000Z", 123);
+    expect(occurredAtMs).toBe(Date.parse("2026-04-04T10:00:00.000Z"));
+  });
+
+  it("falls back when occurredAtUtc is invalid", () => {
+    const occurredAtMs = resolveVoicePresenceOccurredAtMs("not-a-date", 555);
+    expect(occurredAtMs).toBe(555);
+  });
+
+  it("ignores out-of-order events", () => {
+    const outOfOrder = shouldApplyVoicePresenceByTimestamp(
+      "2026-04-04T09:59:59.000Z",
+      Date.parse("2026-04-04T10:00:00.000Z"),
+      0,
+    );
+    expect(outOfOrder.shouldApply).toBe(false);
+  });
+
+  it("accepts newer events", () => {
+    const inOrder = shouldApplyVoicePresenceByTimestamp(
+      "2026-04-04T10:00:01.000Z",
+      Date.parse("2026-04-04T10:00:00.000Z"),
+      0,
+    );
+    expect(inOrder.shouldApply).toBe(true);
+  });
+
+  it("builds stable dedupe signature from user/channel transition/time", () => {
+    const signature = buildVoicePresenceEventSignature(
+      makeEvent({
+        userId: "u-9",
+        previousVoiceChannelId: "v-1",
+        currentVoiceChannelId: "v-2",
+        occurredAtUtc: "2026-04-04T10:00:01.000Z",
+      }),
+    );
+    expect(signature).toBe("u-9|v-1|v-2|2026-04-04T10:00:01.000Z");
   });
 });

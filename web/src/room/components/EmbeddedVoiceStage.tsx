@@ -76,6 +76,7 @@ export function EmbeddedVoiceStage(props: {
   voiceMessages: Array<{ userId: string; username: string; content: string; createdAtUtc: string }>;
   onSendVoiceMessage: (content: string) => Promise<void>;
   onSpeakingUsersChange: (userIds: Set<string>) => void;
+  onActiveParticipantsChange: (participants: Array<{ userId: string; username: string }>) => void;
   onControlsChange: (controls: EmbeddedVoiceControls | null) => void;
   isInActiveVoiceChannel: boolean;
   canModerate: boolean;
@@ -318,6 +319,15 @@ export function EmbeddedVoiceStage(props: {
     );
     props.onSpeakingUsersChange(speakingUsers);
   }, [media.participants, props.onSpeakingUsersChange]);
+
+  useEffect(() => {
+    props.onActiveParticipantsChange(
+      media.participants.map((participant) => ({
+        userId: participant.identity,
+        username: participant.displayName,
+      })),
+    );
+  }, [media.participants, props.onActiveParticipantsChange]);
 
   useEffect(() => {
     media.setPlaybackSuppressed(props.selfDeafened);

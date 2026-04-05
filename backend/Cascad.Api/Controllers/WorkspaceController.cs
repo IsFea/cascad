@@ -3,6 +3,7 @@ using Cascad.Api.Contracts.Workspace;
 using Cascad.Api.Data;
 using Cascad.Api.Data.Entities;
 using Cascad.Api.Extensions;
+using Cascad.Api.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,13 +15,15 @@ namespace Cascad.Api.Controllers;
 [Authorize]
 public sealed class WorkspaceController : ControllerBase
 {
-    private static readonly TimeSpan VoiceSessionTtl = TimeSpan.FromSeconds(30);
-
     private readonly AppDbContext _db;
+    private readonly IVoicePresenceMaintenanceService _voicePresenceMaintenance;
 
-    public WorkspaceController(AppDbContext db)
+    public WorkspaceController(
+        AppDbContext db,
+        IVoicePresenceMaintenanceService voicePresenceMaintenance)
     {
         _db = db;
+        _voicePresenceMaintenance = voicePresenceMaintenance;
     }
 
     [HttpGet]
@@ -72,7 +75,7 @@ public sealed class WorkspaceController : ControllerBase
             await _db.SaveChangesAsync(cancellationToken);
         }
 
-        await CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
 
         var channels = await _db.Channels
             .Where(x => x.WorkspaceId == workspace.Id && !x.IsDeleted)
@@ -264,29 +267,4 @@ public sealed class WorkspaceController : ControllerBase
         return new UserDto(user.Id, user.Username, user.Status, user.PlatformRole, user.AvatarUrl);
     }
 
-    private async Task CleanupStaleVoiceStateAsync(CancellationToken cancellationToken)
-    {
-        var cutoff = DateTime.UtcNow - VoiceSessionTtl;
-
-        var staleSessions = await _db.VoiceSessions
-            .Where(x => x.LastSeenAtUtc < cutoff)
-            .ToListAsync(cancellationToken);
-        if (staleSessions.Count > 0)
-        {
-            _db.VoiceSessions.RemoveRange(staleSessions);
-        }
-
-        var staleStreams = await _db.VoiceStreamPublications
-            .Where(x => x.LastSeenAtUtc < cutoff)
-            .ToListAsync(cancellationToken);
-        if (staleStreams.Count > 0)
-        {
-            _db.VoiceStreamPublications.RemoveRange(staleStreams);
-        }
-
-        if (staleSessions.Count > 0 || staleStreams.Count > 0)
-        {
-            await _db.SaveChangesAsync(cancellationToken);
-        }
-    }
 }

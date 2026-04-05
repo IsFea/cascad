@@ -21,24 +21,28 @@ public sealed class VoiceController : ControllerBase
 {
     private const string VoiceSessionReplacedCode = "VOICE_SESSION_REPLACED";
     private const string VoiceServerModeratedCode = "VOICE_SERVER_MODERATED";
-    private static readonly TimeSpan VoiceSessionTtl = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan StreamLeaseTtl = TimeSpan.FromSeconds(30);
 
     private readonly AppDbContext _db;
     private readonly IHubContext<ChatHub> _hubContext;
     private readonly ILiveKitTokenService _liveKitTokenService;
     private readonly LiveKitOptions _liveKitOptions;
+    private readonly VoicePresenceOptions _voicePresenceOptions;
+    private readonly IVoicePresenceMaintenanceService _voicePresenceMaintenance;
 
     public VoiceController(
         AppDbContext db,
         IHubContext<ChatHub> hubContext,
         ILiveKitTokenService liveKitTokenService,
-        IOptions<LiveKitOptions> liveKitOptions)
+        IOptions<LiveKitOptions> liveKitOptions,
+        IOptions<VoicePresenceOptions> voicePresenceOptions,
+        IVoicePresenceMaintenanceService voicePresenceMaintenance)
     {
         _db = db;
         _hubContext = hubContext;
         _liveKitTokenService = liveKitTokenService;
         _liveKitOptions = liveKitOptions.Value;
+        _voicePresenceOptions = voicePresenceOptions.Value;
+        _voicePresenceMaintenance = voicePresenceMaintenance;
     }
 
     [HttpPost("connect")]
@@ -77,7 +81,7 @@ public sealed class VoiceController : ControllerBase
             return Forbid();
         }
 
-        await CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
 
         var existingSessions = await _db.VoiceSessions
             .Where(x => x.UserId == userId)
@@ -286,7 +290,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
 
         var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == request.ChannelId && x.UserId == userId,
@@ -401,7 +405,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
 
         var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == request.ChannelId && x.UserId == userId,
@@ -727,7 +731,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
 
         var channel = await _db.Channels.SingleOrDefaultAsync(
             x => x.Id == request.ChannelId && !x.IsDeleted,
@@ -753,7 +757,7 @@ public sealed class VoiceController : ControllerBase
 
         var now = DateTime.UtcNow;
         session.LastSeenAtUtc = now;
-        var staleCutoff = now - StreamLeaseTtl;
+        var staleCutoff = now - TimeSpan.FromSeconds(Math.Max(1, _voicePresenceOptions.StreamTtlSeconds));
         var staleEntries = await _db.VoiceStreamPublications
             .Where(x => x.ChannelId == channel.Id && x.LastSeenAtUtc < staleCutoff)
             .ToListAsync(cancellationToken);
@@ -814,7 +818,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
 
         var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == request.ChannelId && x.UserId == userId,
@@ -946,64 +950,7 @@ public sealed class VoiceController : ControllerBase
             serverDeafened);
     }
 
-    private async Task CleanupStaleVoiceStateAsync(CancellationToken cancellationToken)
-    {
-        var now = DateTime.UtcNow;
-        var staleSessionCutoff = now - VoiceSessionTtl;
-        var staleStreamCutoff = now - StreamLeaseTtl;
-
-        var staleSessions = await _db.VoiceSessions
-            .Include(x => x.Channel)
-            .Include(x => x.User)
-            .Where(x => x.LastSeenAtUtc < staleSessionCutoff)
-            .ToListAsync(cancellationToken);
-
-        if (staleSessions.Count > 0)
-        {
-            _db.VoiceSessions.RemoveRange(staleSessions);
-        }
-
-        var staleStreams = await _db.VoiceStreamPublications
-            .Where(x => x.LastSeenAtUtc < staleStreamCutoff)
-            .ToListAsync(cancellationToken);
-
-        if (staleStreams.Count > 0)
-        {
-            _db.VoiceStreamPublications.RemoveRange(staleStreams);
-        }
-
-        if (staleSessions.Count > 0 || staleStreams.Count > 0)
-        {
-            await _db.SaveChangesAsync(cancellationToken);
-        }
-
-        foreach (var staleSession in staleSessions)
-        {
-            var moderationState = await GetVoiceModerationStateAsync(
-                workspaceId: staleSession.Channel.WorkspaceId,
-                userId: staleSession.UserId,
-                cancellationToken);
-            var effectiveState = ResolveEffectiveVoiceState(
-                selfMuted: false,
-                selfDeafened: false,
-                moderationState);
-            await BroadcastVoicePresenceChangedAsync(
-                workspaceId: staleSession.Channel.WorkspaceId,
-                userId: staleSession.UserId,
-                username: staleSession.User.Username,
-                avatarUrl: staleSession.User.AvatarUrl,
-                previousVoiceChannelId: staleSession.ChannelId,
-                currentVoiceChannelId: null,
-                isMuted: effectiveState.IsMuted,
-                isDeafened: effectiveState.IsDeafened,
-                isServerMuted: effectiveState.IsServerMuted,
-                isServerDeafened: effectiveState.IsServerDeafened,
-                occurredAtUtc: now,
-                cancellationToken: cancellationToken);
-        }
-    }
-
-    private Task BroadcastVoicePresenceChangedAsync(
+    private async Task BroadcastVoicePresenceChangedAsync(
         Guid workspaceId,
         Guid userId,
         string username,
@@ -1017,22 +964,40 @@ public sealed class VoiceController : ControllerBase
         DateTime occurredAtUtc,
         CancellationToken cancellationToken)
     {
-        return _hubContext.Clients.Group(ChatGroupNames.Workspace(workspaceId))
-            .SendAsync(
-                "voicePresenceChanged",
-                new VoicePresenceChangedEvent(
-                    workspaceId,
-                    userId,
-                    username,
-                    avatarUrl,
-                    previousVoiceChannelId,
-                    currentVoiceChannelId,
-                    isMuted,
-                    isDeafened,
-                    isServerMuted,
-                    isServerDeafened,
-                    occurredAtUtc),
-                cancellationToken);
+        var payload = new VoicePresenceChangedEvent(
+            workspaceId,
+            userId,
+            username,
+            avatarUrl,
+            previousVoiceChannelId,
+            currentVoiceChannelId,
+            isMuted,
+            isDeafened,
+            isServerMuted,
+            isServerDeafened,
+            occurredAtUtc);
+
+        var tasks = new List<Task>
+        {
+            _hubContext.Clients.Group(ChatGroupNames.Workspace(workspaceId))
+                .SendAsync("voicePresenceChanged", payload, cancellationToken)
+        };
+
+        if (previousVoiceChannelId.HasValue)
+        {
+            tasks.Add(
+                _hubContext.Clients.Group(ChatGroupNames.VoiceChannel(previousVoiceChannelId.Value))
+                    .SendAsync("voiceChannelPresenceChanged", payload, cancellationToken));
+        }
+
+        if (currentVoiceChannelId.HasValue && currentVoiceChannelId != previousVoiceChannelId)
+        {
+            tasks.Add(
+                _hubContext.Clients.Group(ChatGroupNames.VoiceChannel(currentVoiceChannelId.Value))
+                    .SendAsync("voiceChannelPresenceChanged", payload, cancellationToken));
+        }
+
+        await Task.WhenAll(tasks);
     }
 
     private sealed record EffectiveVoiceState(

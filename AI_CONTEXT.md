@@ -103,3 +103,11 @@ For backend-impacting changes:
 - New behavior is reflected in tests when practical.
 - Changes stay minimal and scoped; avoid broad refactors unless requested.
 
+## 9) Git Remotes
+
+- Primary remote (GitHub): `origin -> https://github.com/IsFea/cascad.git`
+- Mirror/secondary remote (GitVerse): `gitverse -> https://gitverse.ru/isfea/cascad`
+
+Default behavior for AI agents:
+- Push to `origin` unless user explicitly asks for `gitverse`.
+- When user asks to publish to both, push the same branch to both remotes.

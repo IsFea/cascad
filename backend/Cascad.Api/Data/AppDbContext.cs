@@ -36,6 +36,8 @@ public sealed class AppDbContext : DbContext
 
     public DbSet<MessageMention> MessageMentions => Set<MessageMention>();
 
+    public DbSet<MessageReaction> MessageReactions => Set<MessageReaction>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<AppUser>(entity =>
@@ -204,6 +206,11 @@ public sealed class AppDbContext : DbContext
                 .WithMany(x => x.Messages)
                 .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(x => x.DeletedByUser)
+                .WithMany()
+                .HasForeignKey(x => x.DeletedByUserId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         modelBuilder.Entity<MessageAttachment>(entity =>
@@ -232,6 +239,23 @@ public sealed class AppDbContext : DbContext
             entity.HasOne(x => x.MentionedUser)
                 .WithMany(x => x.Mentions)
                 .HasForeignKey(x => x.MentionedUserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<MessageReaction>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Emoji).HasMaxLength(20).IsRequired();
+            entity.HasIndex(x => new { x.MessageId, x.UserId, x.Emoji }).IsUnique();
+
+            entity.HasOne(x => x.Message)
+                .WithMany(x => x.Reactions)
+                .HasForeignKey(x => x.MessageId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(x => x.User)
+                .WithMany(x => x.Reactions)
+                .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

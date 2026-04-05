@@ -90,6 +90,12 @@ export type MessageMentionDto = {
   username: string;
 };
 
+export type MessageReactionDto = {
+  userId: string;
+  username: string;
+  emoji: string;
+};
+
 export type ChannelMessageDto = {
   id: string;
   channelId: string;
@@ -98,8 +104,12 @@ export type ChannelMessageDto = {
   avatarUrl: string | null;
   content: string;
   createdAtUtc: string;
+  updatedAtUtc: string | null;
+  isEdited: boolean;
+  isDeleted: boolean;
   attachments: MessageAttachmentDto[];
   mentions: MessageMentionDto[];
+  reactions: MessageReactionDto[];
 };
 
 export type ChannelMessagesResponse = {

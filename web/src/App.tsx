@@ -17,6 +17,8 @@ import {
   List,
   ListItemButton,
   ListItemText,
+  Menu,
+  MenuItem,
   Paper,
   Popover,
   Slider,
@@ -30,6 +32,8 @@ import {
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import AddReactionIcon from "@mui/icons-material/AddReaction";
+import DeleteIcon from "@mui/icons-material/Delete";
+import EditIcon from "@mui/icons-material/Edit";
 import LogoutIcon from "@mui/icons-material/Logout";
 import SendIcon from "@mui/icons-material/Send";
 import { HubConnection, HubConnectionBuilder, HubConnectionState, LogLevel } from "@microsoft/signalr";
@@ -49,6 +53,7 @@ import {
   JoinRoomResponse,
   LoginResponse,
   MeResponse,
+  MessageReactionDto,
   PendingApprovalDto,
   PlatformRole,
   ProfileResponse,
@@ -329,26 +334,24 @@ async function playVoiceEarcon(context: AudioContext, type: VoiceEarconType) {
   masterGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
 }
 
-function renderMentions(content: string) {
-  const parts = content.split(/(@[\p{L}\p{N}._-]{2,32})/gu);
-  return parts.map((part, index) => {
-    if (part.startsWith("@")) {
-      return (
-        <Box
-          key={`${part}-${index}`}
-          component="span"
-          sx={{
-            color: "primary.light",
-            fontWeight: 700,
-          }}
-        >
-          {part}
-        </Box>
-      );
-    }
+const messageContentStyles = `
+  .mention {
+    color: #97bdff;
+    font-weight: 700;
+  }
+`;
 
-    return <span key={`${part}-${index}`}>{part}</span>;
-  });
+function MessageContent({ content }: { content: string }) {
+  return (
+    <>
+      <style>{messageContentStyles}</style>
+      <Typography
+        variant="body2"
+        component="div"
+        dangerouslySetInnerHTML={{ __html: content }}
+      />
+    </>
+  );
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -633,6 +636,18 @@ function WorkspaceShell(props: {
   const [createChannelError, setCreateChannelError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [participantMenuRequest, setParticipantMenuRequest] = useState<ParticipantMenuRequest | null>(null);
+
+  // Message context menu (right-click)
+  const [messageContextMenu, setMessageContextMenu] = useState<{
+    messageId: string;
+    channelId: string;
+    messageUserId: string;
+    mouseX: number;
+    mouseY: number;
+  } | null>(null);
+
+  // Paste attachments from clipboard
+  const [pasteAttachments, setPasteAttachments] = useState<Array<{ url: string; name: string }>>([]);
 
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const hubRef = useRef<HubConnection | null>(null);
@@ -1014,6 +1029,61 @@ function WorkspaceShell(props: {
       }
     });
 
+    hub.on("messageDeleted", (data: { messageId: string; channelId: string; isDeleted: boolean }) => {
+      if (data.channelId === selectedTextChannelIdRef.current) {
+        setMessages((current) =>
+          current.map((m) =>
+            m.id === data.messageId
+              ? { ...m, isDeleted: true, content: "Сообщение удалено", attachments: [] }
+              : m,
+          ),
+        );
+      }
+    });
+
+    hub.on("messageEdited", (message: ChannelMessageDto) => {
+      if (message.channelId === selectedTextChannelIdRef.current) {
+        setMessages((current) =>
+          current.map((m) => (m.id === message.id ? message : m)),
+        );
+      }
+    });
+
+    hub.on(
+      "reactionChanged",
+      (data: { messageId: string; emoji: string; userId: string; action: "added" | "removed" }) => {
+        if (data.messageId && selectedTextChannelIdRef.current) {
+          setMessages((current) =>
+            current.map((m) => {
+              if (m.id !== data.messageId) return m;
+              if (data.action === "added") {
+                // Reaction will be added when the full message is re-fetched
+                // For optimistic update, we add a placeholder
+                const exists = m.reactions.some(
+                  (r) => r.userId === data.userId && r.emoji === data.emoji,
+                );
+                if (exists) return m;
+                return {
+                  ...m,
+                  reactions: [
+                    ...m.reactions,
+                    { userId: data.userId, username: "", emoji: data.emoji },
+                  ],
+                };
+              } else {
+                return {
+                  ...m,
+                  reactions: m.reactions.filter(
+                    (r) => !(r.userId === data.userId && r.emoji === data.emoji),
+                  ),
+                };
+              }
+            }),
+          );
+        }
+      },
+    );
+
     hub.on(
       "voiceMessage",
       (message: { channelId: string; userId: string; username: string; content: string; createdAtUtc: string }) => {
@@ -1184,23 +1254,116 @@ function WorkspaceShell(props: {
 
   const sendTextMessage = async (event: FormEvent) => {
     event.preventDefault();
-    if (!selectedTextChannelId || (!messageDraft.trim() && attachments.length === 0)) {
+    if (!selectedTextChannelId || (!messageDraft.trim() && attachments.length === 0 && pasteAttachments.length === 0)) {
       return;
     }
 
-    const created = await apiCall<ChannelMessageDto>(
+    // Upload pasted images first
+    const uploadedUrls: string[] = [];
+    for (const pa of pasteAttachments) {
+      try {
+        const response = await fetch(pa.url);
+        const blob = await response.blob();
+        const file = new File([blob], pa.name, { type: blob.type });
+        const formData = new FormData();
+        formData.append("file", file);
+        const uploaded = await apiCall<UploadImageResponse>(
+          "/uploads/chat-image",
+          "POST",
+          formData,
+          props.token,
+        );
+        uploadedUrls.push(uploaded.url);
+      } catch {
+        // Skip failed uploads
+      }
+    }
+
+    const allAttachments = [...attachments, ...uploadedUrls].slice(-4);
+
+    await apiCall<ChannelMessageDto>(
       `/channels/${selectedTextChannelId}/messages`,
       "POST",
       {
         content: messageDraft,
-        attachmentUrls: attachments,
+        attachmentUrls: allAttachments,
       },
       props.token,
     );
 
-    setMessages((current) => [...current, created]);
+    // Message will be added via SignalR "textMessage" broadcast
     setMessageDraft("");
     setAttachments([]);
+    setPasteAttachments([]);
+  };
+
+  const deleteMessage = async (channelId: string, messageId: string) => {
+    try {
+      await apiCall<void>(
+        `/channels/${channelId}/messages/${messageId}`,
+        "DELETE",
+        undefined,
+        props.token,
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to delete message");
+    }
+  };
+
+  const toggleReaction = async (channelId: string, messageId: string, emoji: string) => {
+    const currentMessage = messages.find((m) => m.id === messageId);
+    if (!currentMessage) return;
+
+    const hasReaction = currentMessage.reactions.some(
+      (r) => r.userId === props.currentUser.id && r.emoji === emoji,
+    );
+
+    try {
+      if (hasReaction) {
+        await apiCall<void>(
+          `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`,
+          "DELETE",
+          undefined,
+          props.token,
+        );
+      } else {
+        await apiCall<ChannelMessageDto>(
+          `/channels/${channelId}/messages/${messageId}/reactions`,
+          "POST",
+          { emoji },
+          props.token,
+        );
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to toggle reaction");
+    }
+  };
+
+  const handlePasteFromClipboard = (event: React.ClipboardEvent) => {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith("image/")) {
+        const file = items[i].getAsFile();
+        if (file) {
+          imageFiles.push(file);
+        }
+      }
+    }
+
+    if (imageFiles.length === 0) return;
+
+    event.preventDefault();
+
+    const newAttachments: Array<{ url: string; name: string }> = [];
+    for (const file of imageFiles) {
+      const url = URL.createObjectURL(file);
+      newAttachments.push({ url, name: file.name || "pasted-image.png" });
+    }
+
+    setPasteAttachments((current) => [...current, ...newAttachments].slice(-4));
   };
 
   const uploadChatImage = async (file: File) => {
@@ -1636,7 +1799,10 @@ function WorkspaceShell(props: {
   }
 
   return (
-    <Box sx={{ height: "100vh", overflow: "hidden", p: 1.2, position: "relative" }}>
+    <Box
+      sx={{ height: "100vh", overflow: "hidden", p: 1.2, position: "relative" }}
+      onClick={() => setMessageContextMenu(null)}
+    >
       <input
         ref={avatarInputRef}
         hidden
@@ -1857,12 +2023,23 @@ function WorkspaceShell(props: {
                   <Paper
                     key={message.id}
                     variant="outlined"
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setMessageContextMenu({
+                        messageId: message.id,
+                        channelId: message.channelId,
+                        messageUserId: message.userId,
+                        mouseX: event.clientX + 2,
+                        mouseY: event.clientY - 6,
+                      });
+                    }}
                     sx={{
                       p: 1,
                       bgcolor:
                         message.userId === props.currentUser.id
                           ? alpha("#6ea4ff", 0.11)
                           : "transparent",
+                      opacity: message.isDeleted ? 0.6 : 1,
                     }}
                   >
                     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
@@ -1883,29 +2060,72 @@ function WorkspaceShell(props: {
                       <Typography variant="caption" color="text.secondary">
                         {new Date(message.createdAtUtc).toLocaleTimeString()}
                       </Typography>
+                      {message.isEdited && !message.isDeleted && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ fontStyle: "italic" }}
+                        >
+                          (изменено)
+                        </Typography>
+                      )}
                     </Stack>
-                    <Typography variant="body2">{renderMentions(message.content)}</Typography>
-                    {message.attachments.length > 0 && (
+                    {message.isDeleted ? (
+                      <Typography
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{ fontStyle: "italic" }}
+                      >
+                        {message.content}
+                      </Typography>
+                    ) : (
+                      <MessageContent content={message.content} />
+                    )}
+                    {!message.isDeleted && message.attachments.length > 0 && (
                       <Stack direction="row" spacing={0.8} sx={{ mt: 0.8 }} flexWrap="wrap" useFlexGap>
-                        {message.attachments.map((attachment) => (
-                          <Box
-                            key={attachment.id}
-                            component="img"
-                            src={getSafeImageUrl(attachment.urlPath)}
-                            alt={attachment.originalFileName}
-                            onError={(event) => {
-                              markImageUrlBroken(attachment.urlPath);
-                              event.currentTarget.style.display = "none";
-                            }}
-                            sx={{
-                              width: 160,
-                              height: 100,
-                              objectFit: "cover",
-                              borderRadius: 1,
-                              border: "1px solid rgba(117, 142, 171, 0.35)",
-                            }}
-                          />
-                        ))}
+                        {message.attachments
+                          .filter((a) => a.urlPath)
+                          .map((attachment) => (
+                            <Box
+                              key={attachment.id}
+                              component="img"
+                              src={getSafeImageUrl(attachment.urlPath)}
+                              alt={attachment.originalFileName}
+                              onError={(event) => {
+                                markImageUrlBroken(attachment.urlPath);
+                                event.currentTarget.style.display = "none";
+                              }}
+                              sx={{
+                                width: 160,
+                                height: 100,
+                                objectFit: "cover",
+                                borderRadius: 1,
+                                border: "1px solid rgba(117, 142, 171, 0.35)",
+                              }}
+                            />
+                          ))}
+                      </Stack>
+                    )}
+                    {!message.isDeleted && message.reactions.length > 0 && (
+                      <Stack direction="row" spacing={0.5} sx={{ mt: 0.5 }} flexWrap="wrap" useFlexGap>
+                        {message.reactions.map((reaction, idx) => {
+                          const isOwn = reaction.userId === props.currentUser.id;
+                          return (
+                            <Chip
+                              key={`${reaction.emoji}-${reaction.userId}-${idx}`}
+                              label={`${reaction.emoji}${reaction.username ? ` ${reaction.username}` : ""}`}
+                              size="small"
+                              onClick={() =>
+                                toggleReaction(message.channelId, message.id, reaction.emoji)
+                              }
+                              sx={{
+                                cursor: "pointer",
+                                bgcolor: isOwn ? alpha("#6ea4ff", 0.25) : undefined,
+                                border: isOwn ? "1px solid #6ea4ff" : undefined,
+                              }}
+                            />
+                          );
+                        })}
                       </Stack>
                     )}
                   </Paper>
@@ -1915,7 +2135,11 @@ function WorkspaceShell(props: {
 
             <Divider sx={{ my: 1 }} />
 
-            <Box component="form" onSubmit={sendTextMessage}>
+            <Box
+              component="form"
+              onSubmit={sendTextMessage}
+              onPaste={handlePasteFromClipboard}
+            >
               <Stack spacing={0.8}>
                 {attachments.length > 0 && (
                   <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap>
@@ -1924,14 +2148,34 @@ function WorkspaceShell(props: {
                     ))}
                   </Stack>
                 )}
+                {pasteAttachments.length > 0 && (
+                  <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap>
+                    {pasteAttachments.map((pa, idx) => (
+                      <Box
+                        key={`${pa.url}-${idx}`}
+                        component="img"
+                        src={pa.url}
+                        alt={pa.name}
+                        sx={{
+                          width: 60,
+                          height: 60,
+                          objectFit: "cover",
+                          borderRadius: 1,
+                          border: "1px solid rgba(117, 142, 171, 0.35)",
+                        }}
+                      />
+                    ))}
+                  </Stack>
+                )}
 
                 <Stack direction="row" spacing={0.8}>
                   <TextField
                     fullWidth
                     size="small"
-                    placeholder="Message with @mentions and emoji"
+                    placeholder="Message with @mentions and emoji (Ctrl+V to paste images)"
                     value={messageDraft}
                     onChange={(event) => setMessageDraft(event.target.value)}
+                    onPaste={handlePasteFromClipboard}
                   />
                   <IconButton
                     size="small"
@@ -1994,6 +2238,32 @@ function WorkspaceShell(props: {
           </Box>
         </Box>
       </Popover>
+
+      <Menu
+        open={Boolean(messageContextMenu)}
+        anchorReference="anchorPosition"
+        anchorPosition={
+          messageContextMenu
+            ? { left: messageContextMenu.mouseX, top: messageContextMenu.mouseY }
+            : undefined
+        }
+        onClose={() => setMessageContextMenu(null)}
+      >
+        {(messageContextMenu &&
+          (messageContextMenu.messageUserId === props.currentUser.id || isCurrentUserAdmin)) && (
+          <MenuItem
+            onClick={() => {
+              if (messageContextMenu) {
+                void deleteMessage(messageContextMenu.channelId, messageContextMenu.messageId);
+              }
+              setMessageContextMenu(null);
+            }}
+          >
+            <DeleteIcon sx={{ mr: 1 }} fontSize="small" />
+            Удалить
+          </MenuItem>
+        )}
+      </Menu>
 
       <Dialog
         open={createChannelType !== null}

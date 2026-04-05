@@ -54,4 +54,6 @@ public sealed class AppUser
         new List<VoiceStreamPublication>();
 
     public ICollection<MessageMention> Mentions { get; set; } = new List<MessageMention>();
+
+    public ICollection<MessageReaction> Reactions { get; set; } = new List<MessageReaction>();
 }

@@ -8,5 +8,9 @@ public sealed record ChannelMessageDto(
     string? AvatarUrl,
     string Content,
     DateTime CreatedAtUtc,
+    DateTime? UpdatedAtUtc,
+    bool IsEdited,
+    bool IsDeleted,
     IReadOnlyList<MessageAttachmentDto> Attachments,
-    IReadOnlyList<MessageMentionDto> Mentions);
+    IReadOnlyList<MessageMentionDto> Mentions,
+    IReadOnlyList<MessageReactionDto> Reactions);

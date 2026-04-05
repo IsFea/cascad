@@ -35,6 +35,9 @@ builder.Services.AddScoped<IDatabaseSeeder, DatabaseSeeder>();
 builder.Services.AddScoped<IDatabaseSchemaUpgrader, DatabaseSchemaUpgrader>();
 builder.Services.AddScoped<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 
+builder.Services.AddSingleton<IMessageContentSanitizer, MessageContentSanitizer>();
+builder.Services.AddSingleton<IRateLimitingService, RateLimitingService>();
+
 builder.Services
     .AddControllers()
     .AddJsonOptions(options =>

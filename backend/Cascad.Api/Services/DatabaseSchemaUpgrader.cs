@@ -140,6 +140,40 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
             CREATE INDEX IF NOT EXISTS "IX_ChannelMessages_ChannelId_CreatedAtUtc" ON "ChannelMessages" ("ChannelId", "CreatedAtUtc");
             CREATE INDEX IF NOT EXISTS "IX_MessageAttachments_MessageId" ON "MessageAttachments" ("MessageId");
             CREATE INDEX IF NOT EXISTS "IX_MessageMentions_MentionedUserId" ON "MessageMentions" ("MentionedUserId");
+
+            ALTER TABLE "ChannelMessages" ADD COLUMN IF NOT EXISTS "UpdatedAtUtc" timestamp with time zone;
+            ALTER TABLE "ChannelMessages" ADD COLUMN IF NOT EXISTS "IsEdited" boolean NOT NULL DEFAULT false;
+            ALTER TABLE "ChannelMessages" ADD COLUMN IF NOT EXISTS "IsDeleted" boolean NOT NULL DEFAULT false;
+            ALTER TABLE "ChannelMessages" ADD COLUMN IF NOT EXISTS "DeletedByUserId" uuid;
+            ALTER TABLE "ChannelMessages" ADD COLUMN IF NOT EXISTS "DeletedAtUtc" timestamp with time zone;
+
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'FK_ChannelMessages_Users_DeletedByUserId'
+                ) THEN
+                    ALTER TABLE "ChannelMessages"
+                    ADD CONSTRAINT "FK_ChannelMessages_Users_DeletedByUserId"
+                    FOREIGN KEY ("DeletedByUserId") REFERENCES "Users" ("Id") ON DELETE SET NULL;
+                END IF;
+            END $$;
+
+            CREATE INDEX IF NOT EXISTS "IX_ChannelMessages_DeletedByUserId" ON "ChannelMessages" ("DeletedByUserId");
+
+            CREATE TABLE IF NOT EXISTS "MessageReactions" (
+                "Id" uuid NOT NULL,
+                "MessageId" uuid NOT NULL,
+                "UserId" uuid NOT NULL,
+                "Emoji" character varying(20) NOT NULL,
+                "CreatedAtUtc" timestamp with time zone NOT NULL,
+                CONSTRAINT "PK_MessageReactions" PRIMARY KEY ("Id"),
+                CONSTRAINT "FK_MessageReactions_ChannelMessages_MessageId" FOREIGN KEY ("MessageId") REFERENCES "ChannelMessages" ("Id") ON DELETE CASCADE,
+                CONSTRAINT "FK_MessageReactions_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_MessageReactions_MessageId_UserId_Emoji" ON "MessageReactions" ("MessageId", "UserId", "Emoji");
+            CREATE INDEX IF NOT EXISTS "IX_MessageReactions_UserId" ON "MessageReactions" ("UserId");
             """,
             cancellationToken);
     }

@@ -20,7 +20,21 @@ public sealed class ChannelMessage
 
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 
+    public DateTime? UpdatedAtUtc { get; set; }
+
+    public bool IsEdited { get; set; }
+
+    public bool IsDeleted { get; set; }
+
+    public Guid? DeletedByUserId { get; set; }
+
+    public AppUser? DeletedByUser { get; set; }
+
+    public DateTime? DeletedAtUtc { get; set; }
+
     public ICollection<MessageAttachment> Attachments { get; set; } = new List<MessageAttachment>();
 
     public ICollection<MessageMention> Mentions { get; set; } = new List<MessageMention>();
+
+    public ICollection<MessageReaction> Reactions { get; set; } = new List<MessageReaction>();
 }

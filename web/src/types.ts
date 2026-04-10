@@ -172,7 +172,6 @@ export type VoicePresenceChangedEvent = {
   occurredAtUtc: string;
 };
 
-// Legacy room-session shape used by RoomShell.
 export type RoomDto = {
   id: string;
   name: string;

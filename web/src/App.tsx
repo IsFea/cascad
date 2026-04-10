@@ -3017,7 +3017,11 @@ function WorkspaceShell(props: {
     }
 
     const effectiveLocalMute = selfMuted || selfDeafened || selfServerDeafened;
-    void voiceControlActionsRef.current.setMuted(effectiveLocalMute).catch(() => undefined);
+    void voiceControlActionsRef.current.setMuted(effectiveLocalMute).catch((reason) => {
+      const message =
+        reason instanceof Error ? reason.message : "Failed to sync microphone state.";
+      setError(message);
+    });
   }, [selfMuted, selfDeafened, selfServerDeafened, voiceSession?.sessionInstanceId]);
 
   if (loading) {

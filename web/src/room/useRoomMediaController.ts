@@ -53,6 +53,10 @@ const BOOST_COMPRESSOR_KNEE_DB = 16;
 const BOOST_COMPRESSOR_RATIO = 4;
 const BOOST_COMPRESSOR_ATTACK_SEC = 0.003;
 const BOOST_COMPRESSOR_RELEASE_SEC = 0.22;
+const REMOTE_ACTIVITY_POLL_MS = 280;
+const LOCAL_ACTIVITY_POLL_MS = 180;
+const DIAGNOSTICS_POLL_MS = 2500;
+const UPLINK_STALL_WARNING_MS = 3200;
 
 function isEngineNotConnectedTimeoutError(reason: unknown): boolean {
   if (!(reason instanceof Error)) {
@@ -73,6 +77,73 @@ function isAudioAutoplayBlockedError(reason: unknown): boolean {
     message.includes("user gesture") ||
     message.includes("autoplay")
   );
+}
+
+type VoiceDiagnostics = {
+  latencyMs: number | null;
+  latencyQuality: "low" | "medium" | "high" | "unknown";
+  uplinkIssue: boolean;
+};
+
+function classifyLatency(latencyMs: number | null): VoiceDiagnostics["latencyQuality"] {
+  if (latencyMs === null || !Number.isFinite(latencyMs)) {
+    return "unknown";
+  }
+  if (latencyMs <= 120) {
+    return "low";
+  }
+  if (latencyMs <= 250) {
+    return "medium";
+  }
+  return "high";
+}
+
+function extractPublisherStats(report: RTCStatsReport): { latencyMs: number | null; bytesSent: number | null } {
+  let latencyMs: number | null = null;
+  let bytesSent: number | null = null;
+
+  report.forEach((entry) => {
+    if (entry.type === "remote-inbound-rtp") {
+      const remoteInbound = entry as RTCStats & { kind?: string; roundTripTime?: number };
+      const kind = remoteInbound.kind;
+      const roundTripTime = remoteInbound.roundTripTime;
+      if (kind === "audio" && typeof roundTripTime === "number") {
+        latencyMs = Math.round(roundTripTime * 1000);
+      }
+      return;
+    }
+
+    if (entry.type === "outbound-rtp") {
+      const outbound = entry as RTCOutboundRtpStreamStats;
+      if (outbound.kind !== "audio" || typeof outbound.bytesSent !== "number") {
+        return;
+      }
+      bytesSent = (bytesSent ?? 0) + outbound.bytesSent;
+      return;
+    }
+
+    if (entry.type === "candidate-pair" && latencyMs === null) {
+      const pair = entry as RTCIceCandidatePairStats;
+      if (
+        pair.nominated &&
+        pair.state === "succeeded" &&
+        typeof pair.currentRoundTripTime === "number"
+      ) {
+        latencyMs = Math.round(pair.currentRoundTripTime * 1000);
+      }
+    }
+  });
+
+  return { latencyMs, bytesSent };
+}
+
+function getPublisherPeerConnection(room: Room): RTCPeerConnection | null {
+  const candidate = (room as unknown as { engine?: { pcManager?: { publisher?: unknown } } }).engine
+    ?.pcManager?.publisher as { getStats?: () => Promise<RTCStatsReport> } | undefined;
+  if (candidate && typeof candidate.getStats === "function") {
+    return candidate as RTCPeerConnection;
+  }
+  return null;
 }
 
 type UseRoomMediaControllerResult = {
@@ -101,6 +172,9 @@ type UseRoomMediaControllerResult = {
   streamStartOptions: StreamStartOptions;
   supportsOutputSelection: boolean;
   remoteParticipantsCount: number;
+  latencyMs: number | null;
+  latencyQuality: "low" | "medium" | "high" | "unknown";
+  uplinkIssue: boolean;
   setLayoutMode: (mode: StreamLayoutMode) => void;
   setFocusedStream: (sid: string | null) => void;
   setPlaybackSuppressed: (value: boolean) => void;
@@ -148,6 +222,11 @@ export function useRoomMediaController(
 
   const [dspSettings, setDspSettings] = useState<DspSettings>(DEFAULT_DSP_SETTINGS);
   const [dspApplying, setDspApplying] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<VoiceDiagnostics>({
+    latencyMs: null,
+    latencyQuality: "unknown",
+    uplinkIssue: false,
+  });
 
   const [streamStartOptions, setStreamStartOptions] = useState<StreamStartOptions>(
     DEFAULT_STREAM_START_OPTIONS,
@@ -179,6 +258,10 @@ export function useRoomMediaController(
   const localVoiceActivityIntervalIdRef = useRef<number | null>(null);
   const localVoiceActiveUntilMsRef = useRef<number | undefined>(undefined);
   const pendingAudioUnlockRef = useRef(false);
+  const localVoiceDetectedRef = useRef(false);
+  const lastSentAudioBytesRef = useRef<number | null>(null);
+  const uplinkStalledSinceRef = useRef<number | null>(null);
+  const recoveringMicrophoneRef = useRef(false);
 
   useEffect(() => {
     const retryStartAudio = () => {
@@ -666,6 +749,7 @@ export function useRoomMediaController(
     }
 
     localVoiceActiveUntilMsRef.current = undefined;
+    localVoiceDetectedRef.current = false;
     if (identity) {
       setSourceActivity(identity, "voice", false);
     }
@@ -679,6 +763,7 @@ export function useRoomMediaController(
       localVoiceAnalyserRef.current = analyser;
       localVoiceActivityIntervalIdRef.current = window.setInterval(() => {
         if (!localVoiceAnalyserRef.current || mutedRef.current) {
+          localVoiceDetectedRef.current = false;
           setSourceActivity(identity, "voice", false);
           return;
         }
@@ -694,8 +779,9 @@ export function useRoomMediaController(
         );
 
         localVoiceActiveUntilMsRef.current = activity.activeUntilMs;
+        localVoiceDetectedRef.current = activity.isActive;
         setSourceActivity(identity, "voice", activity.isActive);
-      }, 160);
+      }, LOCAL_ACTIVITY_POLL_MS);
     } catch {
       // local analyser support is browser-dependent
     }
@@ -862,26 +948,130 @@ export function useRoomMediaController(
 
   const createAndPublishMicrophoneTrack = async (room: Room, deviceId?: string) => {
     const localIdentity = room.localParticipant.identity;
+    const previousTrack = localAudioRef.current;
 
-    if (localAudioRef.current) {
+    if (previousTrack) {
       clearLocalVoiceActivity(localIdentity);
-      await room.localParticipant.unpublishTrack(localAudioRef.current);
-      localAudioRef.current.stop();
+      await room.localParticipant.unpublishTrack(previousTrack);
       localAudioRef.current = null;
     }
 
-    const microphone = await createLocalMicrophoneTrack(deviceId);
+    try {
+      const microphone = await createLocalMicrophoneTrack(deviceId);
 
-    await room.localParticipant.publishTrack(microphone, {
-      source: Track.Source.Microphone,
-    });
+      await room.localParticipant.publishTrack(microphone, {
+        source: Track.Source.Microphone,
+      });
 
-    if (mutedRef.current) {
-      await microphone.mute();
+      if (mutedRef.current) {
+        await microphone.mute();
+      }
+
+      localAudioRef.current = microphone;
+      setupLocalVoiceActivity(microphone, localIdentity);
+      previousTrack?.stop();
+    } catch (reason) {
+      if (previousTrack) {
+        try {
+          await room.localParticipant.publishTrack(previousTrack, {
+            source: Track.Source.Microphone,
+          });
+          if (mutedRef.current) {
+            await previousTrack.mute();
+          } else {
+            await previousTrack.unmute();
+          }
+          localAudioRef.current = previousTrack;
+          setupLocalVoiceActivity(previousTrack, localIdentity);
+        } catch {
+          previousTrack.stop();
+          localAudioRef.current = null;
+        }
+      }
+      throw reason;
+    }
+  };
+
+  const ensureLocalMicrophonePublished = async (room: Room) => {
+    if (recoveringMicrophoneRef.current) {
+      return;
     }
 
-    localAudioRef.current = microphone;
-    setupLocalVoiceActivity(microphone, localIdentity);
+    const localTrack = localAudioRef.current;
+    const publication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+    const needsRecovery =
+      !localTrack ||
+      localTrack.mediaStreamTrack.readyState === "ended" ||
+      !publication ||
+      publication.track !== localTrack;
+
+    if (!needsRecovery) {
+      return;
+    }
+
+    recoveringMicrophoneRef.current = true;
+    try {
+      await createAndPublishMicrophoneTrack(room, selectedInputRef.current || undefined);
+      setError(null);
+    } catch (reason) {
+      const message =
+        reason instanceof Error ? reason.message : "Microphone recovery failed after reconnect.";
+      setError(message);
+    } finally {
+      recoveringMicrophoneRef.current = false;
+    }
+  };
+
+  const pollVoiceDiagnostics = async (room: Room) => {
+    if (room.state !== ConnectionState.Connected) {
+      setDiagnostics({ latencyMs: null, latencyQuality: "unknown", uplinkIssue: false });
+      return;
+    }
+
+    const peerConnection = getPublisherPeerConnection(room);
+    if (!peerConnection) {
+      setDiagnostics((current) => ({ ...current, latencyMs: null, latencyQuality: "unknown" }));
+      return;
+    }
+
+    try {
+      const stats = await peerConnection.getStats();
+      const { latencyMs, bytesSent } = extractPublisherStats(stats);
+      const nowMs = Date.now();
+      const tryingToSend = !mutedRef.current && localVoiceDetectedRef.current;
+
+      if (!tryingToSend) {
+        uplinkStalledSinceRef.current = null;
+      } else if (bytesSent !== null) {
+        const previousBytes = lastSentAudioBytesRef.current;
+        if (previousBytes !== null && bytesSent <= previousBytes) {
+          if (uplinkStalledSinceRef.current === null) {
+            uplinkStalledSinceRef.current = nowMs;
+          }
+        } else {
+          uplinkStalledSinceRef.current = null;
+        }
+      }
+
+      if (bytesSent !== null) {
+        lastSentAudioBytesRef.current = bytesSent;
+      }
+
+      const stalledForMs =
+        uplinkStalledSinceRef.current === null ? 0 : nowMs - uplinkStalledSinceRef.current;
+      const uplinkIssue = tryingToSend && stalledForMs >= UPLINK_STALL_WARNING_MS;
+      setDiagnostics({
+        latencyMs,
+        latencyQuality: classifyLatency(latencyMs),
+        uplinkIssue,
+      });
+    } catch {
+      setDiagnostics((current) => ({
+        ...current,
+        latencyMs: null,
+        latencyQuality: "unknown",
+      }));
+    }
   };
 
   useEffect(() => {
@@ -896,6 +1086,9 @@ export function useRoomMediaController(
     voiceActivityRef.current.clear();
     screenAudioActivityRef.current.clear();
     pendingAudioUnlockRef.current = false;
+    lastSentAudioBytesRef.current = null;
+    uplinkStalledSinceRef.current = null;
+    setDiagnostics({ latencyMs: null, latencyQuality: "unknown", uplinkIssue: false });
 
     const room = new Room({
       adaptiveStream: true,
@@ -956,7 +1149,7 @@ export function useRoomMediaController(
                 binding.isActive = nextActive;
                 recomputeIdentitySourceActivity(binding.identity, binding.source);
               }
-            }, 160);
+            }, REMOTE_ACTIVITY_POLL_MS);
           } catch {
             // optional activity metrics for per-source indicators
           }
@@ -1068,6 +1261,7 @@ export function useRoomMediaController(
       setConnected(true);
       setError(null);
       syncParticipants(room);
+      void ensureLocalMicrophonePublished(room);
     };
     const onConnectionStateChanged = (state: ConnectionState) => {
       const isConnected = state === ConnectionState.Connected;
@@ -1079,6 +1273,7 @@ export function useRoomMediaController(
     const onDisconnected = () => {
       setConnected(false);
       setSharing(false);
+      setDiagnostics({ latencyMs: null, latencyQuality: "unknown", uplinkIssue: false });
     };
     const onLocalTrackPublished = (publication: { track?: { source?: Track.Source } }) => {
       if (publication.track?.source === Track.Source.ScreenShare) {
@@ -1092,6 +1287,10 @@ export function useRoomMediaController(
         syncParticipants(room);
       }
     };
+
+    const diagnosticsIntervalId = window.setInterval(() => {
+      void pollVoiceDiagnostics(room);
+    }, DIAGNOSTICS_POLL_MS);
 
     room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
@@ -1129,6 +1328,7 @@ export function useRoomMediaController(
         syncParticipants(room);
         setConnected(true);
         setError(null);
+        void pollVoiceDiagnostics(room);
       } catch (reason) {
         const message =
           reason instanceof Error ? reason.message : "Failed to connect to the room.";
@@ -1153,6 +1353,7 @@ export function useRoomMediaController(
       room.off(RoomEvent.Disconnected, onDisconnected);
       room.off(RoomEvent.LocalTrackPublished, onLocalTrackPublished);
       room.off(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
+      window.clearInterval(diagnosticsIntervalId);
 
       void room.disconnect();
 
@@ -1228,23 +1429,33 @@ export function useRoomMediaController(
   };
 
   const setLocalMute = async (nextMuted: boolean) => {
-    mutedRef.current = nextMuted;
-    setMuted((current) => (current === nextMuted ? current : nextMuted));
+    const localIdentity = roomRef.current?.localParticipant.identity ?? session.user.id;
 
     if (!localAudioRef.current) {
-      const localIdentity = roomRef.current?.localParticipant.identity ?? session.user.id;
+      mutedRef.current = nextMuted;
+      setMuted((current) => (current === nextMuted ? current : nextMuted));
       patchParticipant(localIdentity, { voiceMutedLocal: nextMuted });
       return;
     }
 
-    if (nextMuted) {
-      await localAudioRef.current.mute();
-    } else {
-      await localAudioRef.current.unmute();
+    try {
+      if (nextMuted) {
+        await localAudioRef.current.mute();
+      } else {
+        await localAudioRef.current.unmute();
+      }
+    } catch (reason) {
+      const message =
+        reason instanceof Error ? reason.message : "Could not update microphone mute state.";
+      setError(message);
+      throw reason;
     }
 
-    const localIdentity = roomRef.current?.localParticipant.identity ?? session.user.id;
+    mutedRef.current = nextMuted;
+    setMuted((current) => (current === nextMuted ? current : nextMuted));
     if (nextMuted) {
+      localVoiceDetectedRef.current = false;
+      uplinkStalledSinceRef.current = null;
       setSourceActivity(localIdentity, "voice", false);
     }
     patchParticipant(localIdentity, { voiceMutedLocal: nextMuted });
@@ -1477,6 +1688,9 @@ export function useRoomMediaController(
     streamStartOptions,
     supportsOutputSelection: supportsAudioOutputSelection(),
     remoteParticipantsCount: participants.filter((participant) => !participant.isLocal).length,
+    latencyMs: diagnostics.latencyMs,
+    latencyQuality: diagnostics.latencyQuality,
+    uplinkIssue: diagnostics.uplinkIssue,
     setLayoutMode,
     setFocusedStream,
     setPlaybackSuppressed,

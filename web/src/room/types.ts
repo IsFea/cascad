@@ -35,15 +35,6 @@ export type ParticipantAudioMenuState = {
   scope: "normal" | "fullscreen-avatar" | "participant-rail";
 };
 
-export type RightPanelMode = "participants" | "chat" | "rail";
-
-export type RoomShellLayoutState = {
-  leftSidebarCollapsed: boolean;
-  activeVoiceChannelId: string;
-  activeTextChannelId: string;
-  rightPanelMode: RightPanelMode;
-};
-
 export type AudioAnalyserHandle = {
   calculateVolume: () => number;
   cleanup: () => Promise<void>;

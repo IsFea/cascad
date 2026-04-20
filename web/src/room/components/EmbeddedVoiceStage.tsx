@@ -2,7 +2,9 @@ import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import GraphicEqIcon from "@mui/icons-material/GraphicEq";
 import GridViewIcon from "@mui/icons-material/GridView";
+import NetworkPingIcon from "@mui/icons-material/NetworkPing";
 import ViewCarouselIcon from "@mui/icons-material/ViewCarousel";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import {
   Alert,
   Box,
@@ -49,6 +51,19 @@ import { StreamContextMenu } from "./StreamContextMenu";
 import { StreamStage } from "./StreamStage";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
+
+function latencyChipColor(quality: "low" | "medium" | "high" | "unknown"): "success" | "warning" | "error" | "default" {
+  if (quality === "low") {
+    return "success";
+  }
+  if (quality === "medium") {
+    return "warning";
+  }
+  if (quality === "high") {
+    return "error";
+  }
+  return "default";
+}
 
 export type EmbeddedVoiceControls = {
   muted: boolean;
@@ -387,6 +402,26 @@ export function EmbeddedVoiceStage(props: {
             variant={media.connected ? "filled" : "outlined"}
             size="small"
           />
+          <Chip
+            icon={<NetworkPingIcon />}
+            color={latencyChipColor(media.latencyQuality)}
+            label={
+              media.latencyMs === null
+                ? "Latency --"
+                : `Latency ${Math.max(0, Math.round(media.latencyMs))} ms`
+            }
+            variant={media.latencyMs === null ? "outlined" : "filled"}
+            size="small"
+          />
+          {media.uplinkIssue && (
+            <Chip
+              icon={<WarningAmberIcon />}
+              color="warning"
+              label="Mic signal is not reaching server"
+              variant="filled"
+              size="small"
+            />
+          )}
           <ToggleButtonGroup
             size="small"
             value={media.layoutState.mode}

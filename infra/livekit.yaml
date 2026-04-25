@@ -4,8 +4,12 @@ bind_addresses:
 rtc:
   udp_port: 7882
   tcp_port: 7881
-  use_external_ip: false
+  use_external_ip: true
 keys:
   devkey: DEV_LIVEKIT_SECRET_KEY_1234567890123456
 logging:
   level: info
+webhook:
+  api_key: devkey
+  urls:
+    - http://api:8080/api/voice/livekit-webhook

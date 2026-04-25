@@ -1,3 +1,9 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Diagnostics;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Cascad.Api.Contracts.Voice;
 using Cascad.Api.Data;
 using Cascad.Api.Data.Entities;
@@ -11,6 +17,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 
 namespace Cascad.Api.Controllers;
 
@@ -29,6 +36,7 @@ public sealed class VoiceController : ControllerBase
     private readonly LiveKitOptions _liveKitOptions;
     private readonly VoicePresenceOptions _voicePresenceOptions;
     private readonly IVoicePresenceMaintenanceService _voicePresenceMaintenance;
+    private readonly ILogger<VoiceController> _logger;
 
     public VoiceController(
         AppDbContext db,
@@ -36,7 +44,8 @@ public sealed class VoiceController : ControllerBase
         ILiveKitTokenService liveKitTokenService,
         IOptions<LiveKitOptions> liveKitOptions,
         IOptions<VoicePresenceOptions> voicePresenceOptions,
-        IVoicePresenceMaintenanceService voicePresenceMaintenance)
+        IVoicePresenceMaintenanceService voicePresenceMaintenance,
+        ILogger<VoiceController> logger)
     {
         _db = db;
         _hubContext = hubContext;
@@ -44,6 +53,7 @@ public sealed class VoiceController : ControllerBase
         _liveKitOptions = liveKitOptions.Value;
         _voicePresenceOptions = voicePresenceOptions.Value;
         _voicePresenceMaintenance = voicePresenceMaintenance;
+        _logger = logger;
     }
 
     [HttpPost("connect")]
@@ -56,6 +66,7 @@ public sealed class VoiceController : ControllerBase
         [FromBody] VoiceConnectRequest request,
         CancellationToken cancellationToken)
     {
+        var connectStopwatch = Stopwatch.StartNew();
         if (!User.TryGetUserId(out var userId))
         {
             return Unauthorized();
@@ -83,7 +94,16 @@ public sealed class VoiceController : ControllerBase
             return Forbid();
         }
 
-        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        var staleSessionCutoff = now - TimeSpan.FromSeconds(Math.Max(1, _voicePresenceOptions.SessionTtlSeconds));
+        var staleChannelSessions = await _db.VoiceSessions
+            .Where(x => x.ChannelId == channel.Id && x.LastSeenAtUtc < staleSessionCutoff)
+            .ToListAsync(cancellationToken);
+        if (staleChannelSessions.Count > 0)
+        {
+            _db.VoiceSessions.RemoveRange(staleChannelSessions);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         var existingSessions = await _db.VoiceSessions
             .Where(x => x.UserId == userId)
@@ -126,7 +146,6 @@ public sealed class VoiceController : ControllerBase
             }
         }
 
-        var now = DateTime.UtcNow;
         var sessionInstanceId = Guid.NewGuid().ToString("N");
         var tabInstanceId = hasRequestedTabInstanceId
             ? requestedTabInstanceId!
@@ -147,7 +166,11 @@ public sealed class VoiceController : ControllerBase
                 SessionInstanceId = sessionInstanceId,
                 TabInstanceId = tabInstanceId,
                 ConnectedAtUtc = now,
-                LastSeenAtUtc = now
+                LastSeenAtUtc = now,
+                PendingPreviousChannelId = previousVoiceChannelId != channel.Id
+                    ? previousVoiceChannelId
+                    : null,
+                JoinBroadcastedAtUtc = null
             });
         }
         else
@@ -155,34 +178,21 @@ public sealed class VoiceController : ControllerBase
             current.SessionInstanceId = sessionInstanceId;
             current.TabInstanceId = tabInstanceId;
             current.LastSeenAtUtc = now;
+            current.PendingPreviousChannelId = previousVoiceChannelId != channel.Id
+                ? previousVoiceChannelId
+                : null;
+            current.JoinBroadcastedAtUtc = null;
         }
 
         await _db.SaveChangesAsync(cancellationToken);
 
-        var moderationState = await GetVoiceModerationStateAsync(channel.WorkspaceId, userId, cancellationToken);
-        if (previousVoiceChannelId != channel.Id)
-        {
-            var effectiveState = ResolveEffectiveVoiceState(
-                selfMuted: current?.IsMuted ?? false,
-                selfDeafened: current?.IsDeafened ?? false,
-                moderationState);
-            await BroadcastVoicePresenceChangedAsync(
-                workspaceId: channel.WorkspaceId,
-                userId: user.Id,
-                username: user.Username,
-                avatarUrl: user.AvatarUrl,
-                previousVoiceChannelId: previousVoiceChannelId,
-                currentVoiceChannelId: channel.Id,
-                isScreenSharing: false,
-                isMuted: effectiveState.IsMuted,
-                isDeafened: effectiveState.IsDeafened,
-                isServerMuted: effectiveState.IsServerMuted,
-                isServerDeafened: effectiveState.IsServerDeafened,
-                occurredAtUtc: now,
-                cancellationToken: cancellationToken);
-        }
-
         var rtcToken = _liveKitTokenService.GenerateToken(channel, user);
+        _logger.LogInformation(
+            "Voice connect prepared. UserId={UserId}; ChannelId={ChannelId}; ExistingSessions={ExistingSessions}; DurationMs={DurationMs}",
+            userId,
+            channel.Id,
+            existingSessions.Count,
+            connectStopwatch.ElapsedMilliseconds);
         return Ok(new VoiceConnectResponse(
             channel.Id,
             channel.Name,
@@ -192,6 +202,92 @@ public sealed class VoiceController : ControllerBase
             sessionInstanceId,
             channel.MaxParticipants,
             channel.MaxConcurrentStreams));
+    }
+
+    [AllowAnonymous]
+    [HttpPost("livekit-webhook")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> LiveKitWebhook(CancellationToken cancellationToken)
+    {
+        using var reader = new StreamReader(Request.Body, Encoding.UTF8);
+        var payload = await reader.ReadToEndAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return Ok();
+        }
+
+        var authHeader = Request.Headers.Authorization.ToString();
+        if (!TryValidateLiveKitWebhookAuthorization(authHeader, payload))
+        {
+            return Unauthorized();
+        }
+
+        var webhook = ParseLiveKitWebhook(payload);
+        if (webhook is null || !string.Equals(webhook.Event, "participant_joined", StringComparison.Ordinal))
+        {
+            return Ok();
+        }
+
+        if (!Guid.TryParse(webhook.ParticipantIdentity, out var userId))
+        {
+            return Ok();
+        }
+
+        var channel = await _db.Channels
+            .Where(x => !x.IsDeleted && x.Type == ChannelType.Voice && x.LiveKitRoomName == webhook.RoomName)
+            .Select(x => new { x.Id, x.WorkspaceId })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (channel is null)
+        {
+            return Ok();
+        }
+
+        var session = await _db.VoiceSessions
+            .SingleOrDefaultAsync(x => x.ChannelId == channel.Id && x.UserId == userId, cancellationToken);
+        if (session is null || session.JoinBroadcastedAtUtc.HasValue)
+        {
+            return Ok();
+        }
+
+        var user = await _db.Users
+            .Where(x => x.Id == userId)
+            .Select(x => new { x.Username, x.AvatarUrl })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (user is null)
+        {
+            return Ok();
+        }
+
+        var moderationState = await GetVoiceModerationStateAsync(channel.WorkspaceId, userId, cancellationToken);
+        var effectiveState = ResolveEffectiveVoiceState(
+            selfMuted: session.IsMuted,
+            selfDeafened: session.IsDeafened,
+            moderationState);
+
+        var now = DateTime.UtcNow;
+        var previousChannelId = session.PendingPreviousChannelId;
+        session.JoinBroadcastedAtUtc = now;
+        session.PendingPreviousChannelId = null;
+        session.LastSeenAtUtc = now;
+        await _db.SaveChangesAsync(cancellationToken);
+
+        await BroadcastVoicePresenceChangedAsync(
+            workspaceId: channel.WorkspaceId,
+            userId: userId,
+            username: user.Username,
+            avatarUrl: user.AvatarUrl,
+            previousVoiceChannelId: previousChannelId,
+            currentVoiceChannelId: channel.Id,
+            isScreenSharing: false,
+            isMuted: effectiveState.IsMuted,
+            isDeafened: effectiveState.IsDeafened,
+            isServerMuted: effectiveState.IsServerMuted,
+            isServerDeafened: effectiveState.IsServerDeafened,
+            occurredAtUtc: now,
+            cancellationToken: cancellationToken);
+
+        return Ok();
     }
 
     [HttpPost("disconnect")]
@@ -270,6 +366,7 @@ public sealed class VoiceController : ControllerBase
 
                 var workspaceByChannelId = affectedChannels.ToDictionary(x => x.Id, x => x.WorkspaceId);
                 foreach (var session in sessions
+                    .Where(x => x.JoinBroadcastedAtUtc.HasValue)
                     .GroupBy(x => x.ChannelId)
                     .Select(g => g.OrderByDescending(x => x.LastSeenAtUtc).First()))
                 {
@@ -317,7 +414,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken, "self-state");
 
         var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == request.ChannelId && x.UserId == userId,
@@ -436,8 +533,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
-
+        var heartbeatStopwatch = Stopwatch.StartNew();
         var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == request.ChannelId && x.UserId == userId,
             cancellationToken);
@@ -465,6 +561,12 @@ public sealed class VoiceController : ControllerBase
         }
 
         await _db.SaveChangesAsync(cancellationToken);
+        _logger.LogDebug(
+            "Voice heartbeat saved. UserId={UserId}; ChannelId={ChannelId}; SessionId={SessionId}; DurationMs={DurationMs}",
+            userId,
+            request.ChannelId,
+            request.SessionInstanceId,
+            heartbeatStopwatch.ElapsedMilliseconds);
         return NoContent();
     }
 
@@ -771,7 +873,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken, "stream-permit");
 
         var channel = await _db.Channels.SingleOrDefaultAsync(
             x => x.Id == request.ChannelId && !x.IsDeleted,
@@ -872,7 +974,7 @@ public sealed class VoiceController : ControllerBase
             return Unauthorized();
         }
 
-        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
+        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken, "stream-release");
 
         var session = await _db.VoiceSessions.SingleOrDefaultAsync(
             x => x.ChannelId == request.ChannelId && x.UserId == userId,
@@ -1140,9 +1242,104 @@ public sealed class VoiceController : ControllerBase
         await Task.WhenAll(tasks);
     }
 
+    private bool TryValidateLiveKitWebhookAuthorization(string? authorizationHeader, string payload)
+    {
+        if (string.IsNullOrWhiteSpace(authorizationHeader))
+        {
+            return false;
+        }
+
+        const string bearerPrefix = "Bearer ";
+        if (!authorizationHeader.StartsWith(bearerPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var token = authorizationHeader[bearerPrefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return false;
+        }
+
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_liveKitOptions.ApiSecret));
+        var tokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = key,
+            ValidateIssuer = true,
+            ValidIssuer = _liveKitOptions.ApiKey,
+            ValidateAudience = false,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromSeconds(30)
+        };
+
+        var handler = new JwtSecurityTokenHandler();
+        ClaimsPrincipal principal;
+        try
+        {
+            principal = handler.ValidateToken(token, tokenValidationParameters, out _);
+        }
+        catch
+        {
+            return false;
+        }
+
+        var sha256Claim = principal.FindFirst("sha256")?.Value;
+        if (string.IsNullOrWhiteSpace(sha256Claim))
+        {
+            return true;
+        }
+
+        var payloadHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
+        return string.Equals(sha256Claim.Trim().ToLowerInvariant(), payloadHash, StringComparison.Ordinal);
+    }
+
+    private static LiveKitWebhookPayload? ParseLiveKitWebhook(string payload)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            var root = document.RootElement;
+
+            var eventName = root.TryGetProperty("event", out var eventElement)
+                ? eventElement.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(eventName))
+            {
+                return null;
+            }
+
+            var roomName = root.TryGetProperty("room", out var roomElement) &&
+                           roomElement.ValueKind == JsonValueKind.Object &&
+                           roomElement.TryGetProperty("name", out var roomNameElement)
+                ? roomNameElement.GetString()
+                : null;
+            var participantIdentity = root.TryGetProperty("participant", out var participantElement) &&
+                                      participantElement.ValueKind == JsonValueKind.Object &&
+                                      participantElement.TryGetProperty("identity", out var identityElement)
+                ? identityElement.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(roomName) || string.IsNullOrWhiteSpace(participantIdentity))
+            {
+                return null;
+            }
+
+            return new LiveKitWebhookPayload(eventName, roomName, participantIdentity);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private sealed record EffectiveVoiceState(
         bool IsMuted,
         bool IsDeafened,
         bool IsServerMuted,
         bool IsServerDeafened);
+
+    private sealed record LiveKitWebhookPayload(
+        string Event,
+        string RoomName,
+        string ParticipantIdentity);
 }

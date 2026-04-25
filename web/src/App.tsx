@@ -110,6 +110,7 @@ const EMOJI_SET = ["😀", "😂", "😎", "🥳", "❤️", "🔥", "👍", "�
 const EARCON_ATTACK_MS = 10;
 const EARCON_RELEASE_MS = 28;
 const CONNECTING_EARCON_INTERVAL_MS = 1800;
+const WORKSPACE_FALLBACK_SYNC_POLL_MS = 20000;
 const SIGNALR_CLIENT_KEEPALIVE_MS = 5000;
 const SIGNALR_SERVER_TIMEOUT_MS = 30000;
 const SIGNALR_LOG_LEVEL = LogLevel.None;
@@ -1666,7 +1667,7 @@ function WorkspaceShell(props: {
       if (props.currentUser.role === "Admin") {
         void loadApprovals().catch(() => undefined);
       }
-    }, 7000);
+    }, WORKSPACE_FALLBACK_SYNC_POLL_MS);
 
     return () => {
       window.clearInterval(interval);

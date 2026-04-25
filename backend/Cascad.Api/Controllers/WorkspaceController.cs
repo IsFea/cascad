@@ -3,7 +3,6 @@ using Cascad.Api.Contracts.Workspace;
 using Cascad.Api.Data;
 using Cascad.Api.Data.Entities;
 using Cascad.Api.Extensions;
-using Cascad.Api.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -16,14 +15,10 @@ namespace Cascad.Api.Controllers;
 public sealed class WorkspaceController : ControllerBase
 {
     private readonly AppDbContext _db;
-    private readonly IVoicePresenceMaintenanceService _voicePresenceMaintenance;
 
-    public WorkspaceController(
-        AppDbContext db,
-        IVoicePresenceMaintenanceService voicePresenceMaintenance)
+    public WorkspaceController(AppDbContext db)
     {
         _db = db;
-        _voicePresenceMaintenance = voicePresenceMaintenance;
     }
 
     [HttpGet]
@@ -74,8 +69,6 @@ public sealed class WorkspaceController : ControllerBase
             });
             await _db.SaveChangesAsync(cancellationToken);
         }
-
-        await _voicePresenceMaintenance.CleanupStaleVoiceStateAsync(cancellationToken);
 
         var channels = await _db.Channels
             .Where(x => x.WorkspaceId == workspace.Id && !x.IsDeleted)

@@ -16,3 +16,5 @@ web/playwright-report/
 .vs
 .continue/agents/new-config.yaml
 opencode.json
+.local-deploy-vps/deploy_vm4130054_prebuilt.sh
+.local-deploy-vps/README.md

@@ -77,6 +77,8 @@ public sealed class DatabaseSchemaUpgrader : IDatabaseSchemaUpgrader
 
             ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "SessionInstanceId" character varying(80) NOT NULL DEFAULT '';
             ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "TabInstanceId" character varying(80) NOT NULL DEFAULT '';
+            ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "PendingPreviousChannelId" uuid NULL;
+            ALTER TABLE "VoiceSessions" ADD COLUMN IF NOT EXISTS "JoinBroadcastedAtUtc" timestamp with time zone NULL;
 
             CREATE TABLE IF NOT EXISTS "VoiceModerationStates" (
                 "WorkspaceId" uuid NOT NULL,

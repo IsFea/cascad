@@ -36,7 +36,7 @@ public sealed class VoicePresenceCleanupHostedService : BackgroundService
         {
             using var scope = _scopeFactory.CreateScope();
             var maintenance = scope.ServiceProvider.GetRequiredService<IVoicePresenceMaintenanceService>();
-            await maintenance.CleanupStaleVoiceStateAsync(cancellationToken);
+            await maintenance.CleanupStaleVoiceStateAsync(cancellationToken, "hosted-service");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

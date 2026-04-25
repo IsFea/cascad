@@ -21,4 +21,8 @@ public sealed class VoiceSession
     public DateTime ConnectedAtUtc { get; set; } = DateTime.UtcNow;
 
     public DateTime LastSeenAtUtc { get; set; } = DateTime.UtcNow;
+
+    public Guid? PendingPreviousChannelId { get; set; }
+
+    public DateTime? JoinBroadcastedAtUtc { get; set; }
 }

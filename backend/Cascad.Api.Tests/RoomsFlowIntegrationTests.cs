@@ -2,6 +2,9 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Channels;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -12,8 +15,11 @@ using Cascad.Api.Contracts.Auth;
 using Cascad.Api.Contracts.Voice;
 using Cascad.Api.Contracts.Workspace;
 using Cascad.Api.Data;
+using Cascad.Api.Options;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 
 namespace Cascad.Api.Tests;
 
@@ -188,6 +194,13 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
                 "/api/voice/connect",
                 new VoiceConnectRequest { ChannelId = voiceChannelId });
             connectResponse.EnsureSuccessStatusCode();
+            var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+            Assert.NotNull(connectPayload);
+
+            await SendParticipantJoinedWebhookAsync(
+                aliceClient,
+                aliceUserId,
+                connectPayload!.LiveKitRoomName);
 
             var connectEvent = await WaitForVoicePresenceAsync(
                 eventChannel.Reader,
@@ -265,6 +278,13 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
                 "/api/voice/connect",
                 new VoiceConnectRequest { ChannelId = voiceChannelId });
             connectResponse.EnsureSuccessStatusCode();
+            var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+            Assert.NotNull(connectPayload);
+
+            await SendParticipantJoinedWebhookAsync(
+                aliceClient,
+                aliceUserId,
+                connectPayload!.LiveKitRoomName);
 
             var connectEvent = await WaitForVoicePresenceAsync(
                 eventChannel.Reader,
@@ -283,6 +303,94 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
                      x.CurrentVoiceChannelId is null);
             Assert.Equal(voiceChannelId, disconnectEvent.PreviousVoiceChannelId);
             Assert.Null(disconnectEvent.CurrentVoiceChannelId);
+        }
+        finally
+        {
+            await hubConnection.StopAsync();
+            await hubConnection.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task VoicePresenceJoin_ShouldRequireWebhookConfirmation_AndBeIdempotent()
+    {
+        var adminClient = _factory.CreateClient();
+        var adminToken = await LoginAsync(adminClient, "admin", "admin12345");
+        adminClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+
+        await RegisterAndApproveAsync(adminClient, "webhookalice");
+        await RegisterAndApproveAsync(adminClient, "webhookbob");
+
+        var aliceClient = _factory.CreateClient();
+        var aliceToken = await LoginAsync(aliceClient, "webhookalice", "webhookalice12345");
+        aliceClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", aliceToken);
+
+        var bobClient = _factory.CreateClient();
+        var bobToken = await LoginAsync(bobClient, "webhookbob", "webhookbob12345");
+        bobClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bobToken);
+        var bobWorkspace = await bobClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(bobWorkspace);
+
+        var aliceWorkspace = await aliceClient.GetFromJsonAsync<WorkspaceBootstrapResponse>("/api/workspace", JsonOptions);
+        Assert.NotNull(aliceWorkspace);
+        var workspaceId = aliceWorkspace!.Workspace.Id;
+        var voiceChannelId = aliceWorkspace.Channels.First(x => x.Type == Cascad.Api.Data.Entities.ChannelType.Voice).Id;
+        var aliceUserId = aliceWorkspace.CurrentUser.Id;
+
+        var eventChannel = Channel.CreateUnbounded<VoicePresenceChangedEventDto>();
+        var hubConnection = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(new Uri(_factory.Server.BaseAddress.ToString()), "/hubs/chat"),
+                options =>
+                {
+                    options.AccessTokenProvider = () => Task.FromResult<string?>(bobToken);
+                    options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                    options.Transports = HttpTransportType.LongPolling;
+                })
+            .Build();
+
+        hubConnection.On<VoicePresenceChangedEventDto>(
+            "voicePresenceChanged",
+            payload => eventChannel.Writer.TryWrite(payload));
+
+        await hubConnection.StartAsync();
+        try
+        {
+            await hubConnection.InvokeAsync("JoinWorkspace", workspaceId);
+
+            var connectResponse = await aliceClient.PostAsJsonAsync(
+                "/api/voice/connect",
+                new VoiceConnectRequest { ChannelId = voiceChannelId });
+            connectResponse.EnsureSuccessStatusCode();
+            var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+            Assert.NotNull(connectPayload);
+
+            var eventWithoutWebhook = await TryWaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x => x.UserId == aliceUserId && x.CurrentVoiceChannelId == voiceChannelId,
+                TimeSpan.FromMilliseconds(700));
+            Assert.Null(eventWithoutWebhook);
+
+            await SendParticipantJoinedWebhookAsync(
+                aliceClient,
+                aliceUserId,
+                connectPayload!.LiveKitRoomName);
+
+            var joinEvent = await WaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x => x.UserId == aliceUserId && x.CurrentVoiceChannelId == voiceChannelId);
+            Assert.Equal(voiceChannelId, joinEvent.CurrentVoiceChannelId);
+
+            await SendParticipantJoinedWebhookAsync(
+                aliceClient,
+                aliceUserId,
+                connectPayload.LiveKitRoomName);
+
+            var duplicateJoin = await TryWaitForVoicePresenceAsync(
+                eventChannel.Reader,
+                x => x.UserId == aliceUserId && x.CurrentVoiceChannelId == voiceChannelId,
+                TimeSpan.FromMilliseconds(700));
+            Assert.Null(duplicateJoin);
         }
         finally
         {
@@ -369,11 +477,23 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
                 "/api/voice/connect",
                 new VoiceConnectRequest { ChannelId = firstVoiceChannelId });
             connectFirst.EnsureSuccessStatusCode();
+            var firstConnectPayload = await connectFirst.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+            Assert.NotNull(firstConnectPayload);
+            await SendParticipantJoinedWebhookAsync(
+                moverClient,
+                moverUserId,
+                firstConnectPayload!.LiveKitRoomName);
 
             var switchResponse = await moverClient.PostAsJsonAsync(
                 "/api/voice/connect",
                 new VoiceConnectRequest { ChannelId = secondVoiceChannelId });
             switchResponse.EnsureSuccessStatusCode();
+            var switchPayload = await switchResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+            Assert.NotNull(switchPayload);
+            await SendParticipantJoinedWebhookAsync(
+                moverClient,
+                moverUserId,
+                switchPayload!.LiveKitRoomName);
 
             var leftFirstChannelEvent = await WaitForVoicePresenceAsync(
                 eventsA.Reader,
@@ -456,6 +576,12 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
                 "/api/voice/connect",
                 new VoiceConnectRequest { ChannelId = voiceChannelId });
             connectResponse.EnsureSuccessStatusCode();
+            var connectPayload = await connectResponse.Content.ReadFromJsonAsync<VoiceConnectResponse>(JsonOptions);
+            Assert.NotNull(connectPayload);
+            await SendParticipantJoinedWebhookAsync(
+                aliceClient,
+                aliceUserId,
+                connectPayload!.LiveKitRoomName);
 
             _ = await WaitForVoicePresenceAsync(
                 workspaceEventChannel.Reader,
@@ -983,6 +1109,82 @@ public sealed class RoomsFlowIntegrationTests : IClassFixture<TestWebAppFactory>
             await hubConnection.StopAsync();
             await hubConnection.DisposeAsync();
         }
+    }
+
+    [Fact]
+    public void VoicePresenceOptions_ShouldLeaveSafetyMarginForHeartbeat()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var options = scope.ServiceProvider.GetRequiredService<IOptions<VoicePresenceOptions>>().Value;
+        const int heartbeatIntervalSeconds = 15;
+        Assert.True(
+            options.SessionTtlSeconds >= heartbeatIntervalSeconds * 2,
+            $"Session TTL should be at least {heartbeatIntervalSeconds * 2}s but was {options.SessionTtlSeconds}s.");
+        Assert.True(
+            options.CleanupIntervalSeconds < options.SessionTtlSeconds,
+            "Cleanup interval must be lower than session TTL.");
+    }
+
+    [Fact]
+    public void LiveKitYaml_ShouldEnableExternalIp_AndWebhookForwarding()
+    {
+        var liveKitConfigPath = ResolveRepositoryPath("infra", "livekit.yaml");
+        var content = File.ReadAllText(liveKitConfigPath);
+
+        Assert.Contains("use_external_ip: true", content, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("/api/voice/livekit-webhook", content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task SendParticipantJoinedWebhookAsync(
+        HttpClient client,
+        Guid userId,
+        string liveKitRoomName)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var options = scope.ServiceProvider.GetRequiredService<IOptions<LiveKitOptions>>().Value;
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            @event = "participant_joined",
+            room = new { name = liveKitRoomName },
+            participant = new { identity = userId.ToString() }
+        });
+        var payloadHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
+        var now = DateTime.UtcNow;
+        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(options.ApiSecret));
+        var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken(
+            issuer: options.ApiKey,
+            claims:
+            [
+                new Claim("sha256", payloadHash)
+            ],
+            notBefore: now.AddMinutes(-1),
+            expires: now.AddMinutes(5),
+            signingCredentials: credentials);
+        var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/voice/livekit-webhook");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenString);
+        request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+        var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+    }
+
+    private static string ResolveRepositoryPath(params string[] segments)
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "docker-compose.yml")))
+            {
+                return Path.Combine(current.FullName, Path.Combine(segments));
+            }
+
+            current = current.Parent;
+        }
+
+        throw new InvalidOperationException("Could not resolve repository root from test context.");
     }
 
     private static async Task<string> LoginAsync(HttpClient client, string username, string password)

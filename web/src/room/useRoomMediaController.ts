@@ -55,8 +55,16 @@ const BOOST_COMPRESSOR_ATTACK_SEC = 0.003;
 const BOOST_COMPRESSOR_RELEASE_SEC = 0.22;
 const REMOTE_ACTIVITY_POLL_MS = 280;
 const LOCAL_ACTIVITY_POLL_MS = 180;
-const DIAGNOSTICS_POLL_MS = 2500;
+const DIAGNOSTICS_POLL_MS = 20000;
 const UPLINK_STALL_WARNING_MS = 3200;
+
+function logVoicePerf(stage: string, details: Record<string, unknown>) {
+  if (!import.meta.env.DEV) {
+    return;
+  }
+
+  console.debug(`[voice-perf] ${stage}`, details);
+}
 
 function isEngineNotConnectedTimeoutError(reason: unknown): boolean {
   if (!(reason instanceof Error)) {
@@ -258,6 +266,7 @@ export function useRoomMediaController(
   const localVoiceActivityIntervalIdRef = useRef<number | null>(null);
   const localVoiceActiveUntilMsRef = useRef<number | undefined>(undefined);
   const pendingAudioUnlockRef = useRef(false);
+  const diagnosticsPollInFlightRef = useRef(false);
   const localVoiceDetectedRef = useRef(false);
   const lastSentAudioBytesRef = useRef<number | null>(null);
   const uplinkStalledSinceRef = useRef<number | null>(null);
@@ -1023,14 +1032,21 @@ export function useRoomMediaController(
   };
 
   const pollVoiceDiagnostics = async (room: Room) => {
+    if (diagnosticsPollInFlightRef.current) {
+      return;
+    }
+    diagnosticsPollInFlightRef.current = true;
+
     if (room.state !== ConnectionState.Connected) {
       setDiagnostics({ latencyMs: null, latencyQuality: "unknown", uplinkIssue: false });
+      diagnosticsPollInFlightRef.current = false;
       return;
     }
 
     const peerConnection = getPublisherPeerConnection(room);
     if (!peerConnection) {
       setDiagnostics((current) => ({ ...current, latencyMs: null, latencyQuality: "unknown" }));
+      diagnosticsPollInFlightRef.current = false;
       return;
     }
 
@@ -1071,6 +1087,8 @@ export function useRoomMediaController(
         latencyMs: null,
         latencyQuality: "unknown",
       }));
+    } finally {
+      diagnosticsPollInFlightRef.current = false;
     }
   };
 
@@ -1088,6 +1106,7 @@ export function useRoomMediaController(
     pendingAudioUnlockRef.current = false;
     lastSentAudioBytesRef.current = null;
     uplinkStalledSinceRef.current = null;
+    diagnosticsPollInFlightRef.current = false;
     setDiagnostics({ latencyMs: null, latencyQuality: "unknown", uplinkIssue: false });
 
     const room = new Room({
@@ -1123,35 +1142,40 @@ export function useRoomMediaController(
             boostLifecycle: "none",
           };
 
-          try {
-            const analyser = createAudioAnalyser(remoteAudioTrack, { cloneTrack: false });
-            binding.analyser = analyser;
-            binding.activityIntervalId = window.setInterval(() => {
-              if (!binding.analyser) {
-                return;
-              }
+          // Voice activity already comes from LiveKit active speakers.
+          // Per-track analysers are expensive with many concurrent talkers,
+          // so keep them only for screen-share audio indicators.
+          if (source !== "voice") {
+            try {
+              const analyser = createAudioAnalyser(remoteAudioTrack, { cloneTrack: false });
+              binding.analyser = analyser;
+              binding.activityIntervalId = window.setInterval(() => {
+                if (!binding.analyser) {
+                  return;
+                }
 
-              const level = binding.analyser.calculateVolume();
-              const threshold = binding.source === "voice" ? 0.035 : 0.02;
-              const holdMs =
-                binding.source === "voice" ? VOICE_ACTIVE_HOLD_MS : STREAM_ACTIVE_HOLD_MS;
-              const now = Date.now();
-              const activity = resolveActivityWithHold(
-                level,
-                threshold,
-                now,
-                binding.activeUntilMs,
-                holdMs,
-              );
-              binding.activeUntilMs = activity.activeUntilMs;
-              const nextActive = activity.isActive;
-              if (binding.isActive !== nextActive) {
-                binding.isActive = nextActive;
-                recomputeIdentitySourceActivity(binding.identity, binding.source);
-              }
-            }, REMOTE_ACTIVITY_POLL_MS);
-          } catch {
-            // optional activity metrics for per-source indicators
+                const level = binding.analyser.calculateVolume();
+                const threshold = binding.source === "voice" ? 0.035 : 0.02;
+                const holdMs =
+                  binding.source === "voice" ? VOICE_ACTIVE_HOLD_MS : STREAM_ACTIVE_HOLD_MS;
+                const now = Date.now();
+                const activity = resolveActivityWithHold(
+                  level,
+                  threshold,
+                  now,
+                  binding.activeUntilMs,
+                  holdMs,
+                );
+                binding.activeUntilMs = activity.activeUntilMs;
+                const nextActive = activity.isActive;
+                if (binding.isActive !== nextActive) {
+                  binding.isActive = nextActive;
+                  recomputeIdentitySourceActivity(binding.identity, binding.source);
+                }
+              }, REMOTE_ACTIVITY_POLL_MS);
+            } catch {
+              // optional activity metrics for per-source indicators
+            }
           }
 
           audioBindingsRef.current.set(binding.sid, binding);
@@ -1308,31 +1332,72 @@ export function useRoomMediaController(
     room.on(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
 
     const connect = async () => {
+      const connectStartedAt = performance.now();
       try {
         await room.connect(session.rtcUrl, session.rtcToken, {
           autoSubscribe: true,
         });
+        logVoicePerf("room.connect.completed", {
+          roomId: session.room.id,
+          sessionInstanceId: session.sessionInstanceId,
+          elapsedMs: Math.round(performance.now() - connectStartedAt),
+        });
 
-        await refreshDevices(true);
-        await createAndPublishMicrophoneTrack(room, selectedInputRef.current || undefined);
+        const startAudioStartedAt = performance.now();
+        let autoplayBlocked = false;
         try {
           await room.startAudio();
           pendingAudioUnlockRef.current = false;
+          logVoicePerf("room.startAudio.completed", {
+            roomId: session.room.id,
+            elapsedMs: Math.round(performance.now() - startAudioStartedAt),
+          });
         } catch (reason) {
           if (!isAudioAutoplayBlockedError(reason)) {
             throw reason;
           }
+          autoplayBlocked = true;
           pendingAudioUnlockRef.current = true;
+          logVoicePerf("room.startAudio.blocked", {
+            roomId: session.room.id,
+            elapsedMs: Math.round(performance.now() - startAudioStartedAt),
+          });
         }
+
+        const refreshDevicesStartedAt = performance.now();
+        await refreshDevices(true);
+        logVoicePerf("room.refreshDevices.completed", {
+          roomId: session.room.id,
+          elapsedMs: Math.round(performance.now() - refreshDevicesStartedAt),
+        });
+
+        const publishMicStartedAt = performance.now();
+        await createAndPublishMicrophoneTrack(room, selectedInputRef.current || undefined);
+        logVoicePerf("room.publishMicrophone.completed", {
+          roomId: session.room.id,
+          elapsedMs: Math.round(performance.now() - publishMicStartedAt),
+        });
 
         syncParticipants(room);
         setConnected(true);
         setError(null);
         void pollVoiceDiagnostics(room);
+        logVoicePerf("room.connect.pipeline.completed", {
+          roomId: session.room.id,
+          sessionInstanceId: session.sessionInstanceId,
+          autoplayBlocked,
+          totalElapsedMs: Math.round(performance.now() - connectStartedAt),
+        });
       } catch (reason) {
         const message =
           reason instanceof Error ? reason.message : "Failed to connect to the room.";
         setError(message);
+        logVoicePerf("room.connect.pipeline.failed", {
+          roomId: session.room.id,
+          sessionInstanceId: session.sessionInstanceId,
+          totalElapsedMs: Math.round(performance.now() - connectStartedAt),
+          message,
+        });
       }
     };
 
@@ -1372,7 +1437,6 @@ export function useRoomMediaController(
     };
   }, [
     session.room.id,
-    session.rtcToken,
     session.rtcUrl,
     session.sessionInstanceId,
     session.user.username,

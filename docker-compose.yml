@@ -36,10 +36,6 @@ services:
       # EF Core logs every SQL statement at Information. Combined with the
       # 5s VoicePresence cleanup loop that alone wrote ~1.7 GB of logs a month.
       Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command: ${EFCORE_SQL_LOG_LEVEL:-Warning}
-      # The cleanup loop reports "Voice cleanup done" every 5s even with nobody
-      # online. Current source no longer logs this; drop once the deployed
-      # image is rebuilt from HEAD.
-      Logging__LogLevel__Cascad.Api.Services.VoicePresenceMaintenanceService: Warning
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-cascad};Username=${POSTGRES_USER:-cascad};Password=${POSTGRES_PASSWORD:-cascad}
       AppJwt__Issuer: ${APP_JWT_ISSUER:-Cascad.Api}
       AppJwt__Audience: ${APP_JWT_AUDIENCE:-Cascad.Web}

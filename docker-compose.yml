@@ -1,14 +1,26 @@
+# Cap container logs. Without this the json-file driver grows without bound and
+# eventually fills the VPS disk, taking every service down with it.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
     container_name: cascad-postgres
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-cascad}
       POSTGRES_USER: ${POSTGRES_USER:-cascad}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cascad}
     ports:
-      - "5432:5432"
+      # Loopback only. The api reaches postgres over the compose network, so
+      # publishing this to 0.0.0.0 exposed the database to the internet for
+      # nothing. Use an SSH tunnel for external clients.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
@@ -18,8 +30,16 @@ services:
       dockerfile: Cascad.Api/Dockerfile
     container_name: cascad-api
     restart: unless-stopped
+    logging: *default-logging
     environment:
       ASPNETCORE_ENVIRONMENT: Production
+      # EF Core logs every SQL statement at Information. Combined with the
+      # 5s VoicePresence cleanup loop that alone wrote ~1.7 GB of logs a month.
+      Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command: ${EFCORE_SQL_LOG_LEVEL:-Warning}
+      # The cleanup loop reports "Voice cleanup done" every 5s even with nobody
+      # online. Current source no longer logs this; drop once the deployed
+      # image is rebuilt from HEAD.
+      Logging__LogLevel__Cascad.Api.Services.VoicePresenceMaintenanceService: Warning
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-cascad};Username=${POSTGRES_USER:-cascad};Password=${POSTGRES_PASSWORD:-cascad}
       AppJwt__Issuer: ${APP_JWT_ISSUER:-Cascad.Api}
       AppJwt__Audience: ${APP_JWT_AUDIENCE:-Cascad.Web}
@@ -50,16 +70,21 @@ services:
         VITE_API_URL: ${WEB_API_URL:-/api}
     container_name: cascad-web
     restart: unless-stopped
+    logging: *default-logging
 
   livekit:
     image: livekit/livekit-server:latest
     container_name: cascad-livekit
     restart: unless-stopped
+    logging: *default-logging
     command: --config /etc/livekit.yaml
     volumes:
       - ./infra/livekit.yaml:/etc/livekit.yaml:ro
     ports:
-      - "7880:7880"
+      # 7880 is LiveKit's signalling port. Clients reach it as wss://$DOMAIN,
+      # which Caddy proxies via the /rtc* route, so it needs no public publish.
+      - "127.0.0.1:7880:7880"
+      # WebRTC media, contacted by clients directly. Must stay public.
       - "7881:7881/tcp"
       - "7882:7882/udp"
 
@@ -67,6 +92,7 @@ services:
     image: ${COTURN_IMAGE:-coturn/coturn:latest}
     container_name: cascad-coturn
     restart: unless-stopped
+    logging: *default-logging
     command: -c /etc/turnserver.conf
     volumes:
       - ./infra/turnserver.conf:/etc/turnserver.conf:ro
@@ -78,6 +104,7 @@ services:
     image: caddy:2.8
     container_name: cascad-caddy
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - api
       - web
